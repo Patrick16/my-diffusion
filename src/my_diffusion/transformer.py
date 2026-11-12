@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .weights import QLinear
+from .weights import QLinear, shared_input
 
 
 @dataclass(frozen=True)
@@ -83,6 +83,7 @@ class SwiGLU(nn.Module):
         self.down = QLinear(hidden, features, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = shared_input(x, self.gate, self.up)   # gate and up share one input: prepare it for the fp8 multiplication once
         return self.down(F.silu(self.gate(x)) * self.up(x))
 
 
@@ -122,6 +123,7 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor, rope: torch.Tensor | None = None) -> torch.Tensor:
         b, n, _ = x.shape
+        x = shared_input(x, self.wq, self.wk, self.wv, self.gate)   # one shared input for four layers
         q = self.wq(x).view(b, n, self.heads, self.headdim).transpose(1, 2)
         k = self.wk(x).view(b, n, self.kvheads, self.headdim).transpose(1, 2)
         v = self.wv(x).view(b, n, self.kvheads, self.headdim).transpose(1, 2)

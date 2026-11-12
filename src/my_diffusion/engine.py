@@ -29,7 +29,7 @@ from .resolutions import resolve_dimensions
 from .text_encoder import QwenVL
 from .transformer import Krea2Transformer
 from .vae import LATENT_CHANNELS, VAE_SCALE, LatentDecoder
-from .weights import load_into, read_checkpoint
+from .weights import load_into, read_checkpoint, set_matmul
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,8 @@ class Krea2Engine:
         self.model: Krea2Transformer | None = None
         self.vae: LatentDecoder | None = None
         self.checkpoint_name: str | None = None
+        self.matmul: str = settings.matmul   # matrix multiplication mode; changed via set_matmul
+        self.native_layers = 0               # how many layers are currently computed via the native fp8 path
         self._text_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._lora_cache: OrderedDict[tuple[str, float], LoraFile] = OrderedDict()
         self._lock = threading.Lock()   # one generation at a time: there is one GPU
@@ -99,6 +101,20 @@ class Krea2Engine:
         self.gpu.register("model", Resident.with_home_copy(model))
         self.checkpoint_name = path.name
         logger.info("checkpoint %s in RAM: %.1fs", path.name, time.time() - t0)
+        self.set_matmul(self.matmul)
+
+    def set_matmul(self, mode: str) -> None:
+        """Select the matrix multiplication mode (exact / fp8 / fp8_all, see weights.py). It can be changed
+        between requests: the weights are not touched, only the way they are multiplied changes."""
+        self.native_layers = set_matmul(self.model, mode, self.settings.device)
+        self.matmul = mode
+        if mode == "exact":
+            logger.info("multiplication: exact")
+        elif self.native_layers:
+            logger.info("multiplication: %s, the native fp8 path is used by %d layers", mode, self.native_layers)
+        else:
+            # not an error: the fast mode exists only for mxfp8; other formats support only the exact mode
+            logger.info("multiplication: checkpoint %s has no mxfp8 layers, so mode %s does not apply - using exact", self.checkpoint_name, mode)
 
     @property
     def loaded(self) -> bool:
@@ -241,6 +257,7 @@ class Krea2Engine:
             "prompt": prompt, "enhanced_prompt": enhanced,
             "steps": steps, "guidance_scale": guidance_scale, "shift": round(mu, 4),
             "checkpoint": self.checkpoint_name,
+            "matmul": self.matmul if self.native_layers else "exact",   # the mode the image was actually computed with
             "loras": [{"name": f.name, "weight": w} for f, w in lora_files],
             "timings": {k: round(v, 2) for k, v in timings.items()},
         }

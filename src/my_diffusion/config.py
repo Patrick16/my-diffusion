@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     # auto: "raw" in the file name -> raw, otherwise turbo. The kind cannot be determined from the weights themselves.
     checkpoint_kind: Literal["auto", "turbo", "raw"] = "auto"
 
+    # How to multiply the network's matrices (details at the top of weights.py):
+    #   exact   - expand the compressed weights to bf16 and multiply as usual; works everywhere,
+    #             the result matches ComfyUI bit for bit;
+    #   fp8     - multiply mxfp8 layers directly in compressed form on the tensor cores, except the layers that
+    #             the checkpoint author asked to compute exactly (as ComfyUI does). About 30% faster;
+    #   fp8_all - the same for all mxfp8 layers, despite the author's marks. The fastest: ~40% of the time
+    #             of sampling saved at 720p. The image has the same quality, but differs from exact in details.
+    # Fast modes require an NVIDIA 50-series GPU (on another one, loading an mxfp8 checkpoint
+    # will fail - then use exact). Checkpoints in other formats are always computed as exact.
+    # Default is fp8_all: chosen after comparing images (scripts/profile_step.py --real).
+    matmul: Literal["exact", "fp8", "fp8_all"] = "fp8_all"
+
     enhancer_max_new_tokens: int = 220
 
     # --- API ---

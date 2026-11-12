@@ -11,6 +11,7 @@ import logging
 from .config import Settings
 from .engine import Krea2Engine
 from .resolutions import ASPECT_RATIOS, RESOLUTION_TIERS
+from .weights import MATMUL_MODES
 
 
 def _parse_lora(value: str) -> tuple[str, float]:
@@ -35,6 +36,7 @@ def main() -> None:
     parser.add_argument("--enhance", action="store_true", help="first expand the prompt with Qwen")
     parser.add_argument("--checkpoint", default=None, help="file in models/checkpoints")
     parser.add_argument("--count", type=int, default=1, help="how many images in a row (seed increases by 1 each time)")
+    parser.add_argument("--matmul", choices=MATMUL_MODES, default=None, help="matrix multiplication mode; default from the settings")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
@@ -42,6 +44,8 @@ def main() -> None:
     settings = Settings()
     if args.checkpoint:
         settings.checkpoint = args.checkpoint
+    if args.matmul:
+        settings.matmul = args.matmul
     engine = Krea2Engine(settings)
     engine.load()
 
