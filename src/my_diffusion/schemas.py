@@ -44,6 +44,7 @@ class GenerateResponse(BaseModel):
     guidance_scale: float
     shift: float
     checkpoint: str
+    matmul: str = Field(description="Matrix multiplication mode used: exact, fp8 or fp8_all (see MY_DIFFUSION_MATMUL)")
     loras: list[LoraSpec]
     timings: dict[str, float]
 

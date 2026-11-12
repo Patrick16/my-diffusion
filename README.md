@@ -167,6 +167,7 @@ updating the libraries or on another machine.
 | `scripts/smoke_test.py` | the whole path "by hand", linearly, without the engine |
 | `scripts/check_loras.py` | which LoRAs are read, which are not, and why |
 | `scripts/check_checkpoints.py` | every checkpoint produces an image |
+| `scripts/profile_step.py` | where the step time goes; with `--real` - a comparison of the multiplication modes on the real checkpoint |
 
 ## Measurements (RTX 5080 Laptop 16 GB, 64 GB RAM, turbo, 8 steps)
 
@@ -178,6 +179,23 @@ updating the libraries or on another machine.
 
 A repeated request with the same prompt (another seed) at 720 takes about 20 s in total.
 The first load of a checkpoint depends on the disk: 12.6 GB are read sequentially.
+
+### Multiplication mode (`MY_DIFFUSION_MATMUL`)
+
+The table above was measured with the exact method (`exact`): the compressed weights of each layer are unpacked into bf16 and multiplied as usual. NVIDIA 50-series
+GPUs can multiply mxfp8 matrices directly in compressed form - these are the `fp8` and `fp8_all` modes. `fp8_all` is enabled by default:
+
+| Mode | Sampling 480 / 720 / 1080 | What changes |
+|---|---|---|
+| `exact` | ~7 / 15.6 / 39.1 s | the result matches ComfyUI bit for bit |
+| `fp8` | 5.0 / 11.3 / 32.8 s | the input of 160 of the 256 layers is rounded to fp8; the other 96 are computed exactly, as the checkpoint author asks (ComfyUI does the same) |
+| `fp8_all` (default) | 3.1 / 9.1 / 26.0 s | the same for all 256 layers; the picture is of the same quality, but differs from `exact` in details |
+
+The larger the picture, the smaller the gain: at 1080p a third of the step is attention, which this
+mode does not speed up. Fast modes work only with mxfp8 checkpoints (other formats
+are computed as `exact`) and only on NVIDIA 50-series GPUs - on another card set
+`MY_DIFFUSION_MATMUL=exact`. The peak VRAM is the same. To compare the modes on your own prompt: `uv run python scripts/profile_step.py --real` -
+the pictures are saved side by side in `outputs/ab_*.png`.
 
 ## Configuration
 

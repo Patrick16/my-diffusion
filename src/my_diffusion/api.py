@@ -74,7 +74,11 @@ async def _run(func, *args, **kwargs):
 @app.get("/health")
 async def health() -> dict:
     status = "error" if _load_error else "ok" if engine.loaded else "loading"
-    return {"status": status, "error": _load_error, "checkpoint": engine.checkpoint_name, "kind": engine.kind if engine.loaded else None}
+    return {
+        "status": status, "error": _load_error, "checkpoint": engine.checkpoint_name,
+        "kind": engine.kind if engine.loaded else None,
+        "matmul": engine.matmul, "native_layers": engine.native_layers,
+    }
 
 
 @app.get("/resolutions")
