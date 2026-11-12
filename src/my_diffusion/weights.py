@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import struct
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,8 +81,22 @@ _ST_DTYPES = {
 _READ_CHUNK = 256 * 2**20
 
 
-def read_safetensors(path: str | Path, pin: bool = False) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
-    """Reads a .safetensors file entirely into RAM. Returns (tensors, metadata).
+def _layer_of(key: str) -> str:
+    """Tensor name -> the layer it belongs to: "model.diffusion_model.blocks.0.attn.wq.weight_scale" ->
+    "blocks.0.attn.wq". All tensors of one layer (weight, weight_scale, bias, comfy_quant) share it."""
+    if key.startswith(_COMFY_PREFIX):
+        key = key[len(_COMFY_PREFIX):]
+    return key.rsplit(".", 1)[0]
+
+
+def read_safetensors(
+    path: str | Path, pin: bool = False, layers: Collection[str] | None = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+    """Reads a .safetensors file into RAM. Returns (tensors, metadata).
+
+    layers - read only the tensors of these layers (names like "blocks.0.attn.wq") instead of the whole
+    file. For diagnostics: comparing a few layers of several 13 GB checkpoints should not mean reading
+    all of them from a slow disk.
 
     The file format is simple: 8 bytes - the header length, then the JSON header (name -> type,
     size, offset), then the raw bytes of all tensors one after another.
@@ -101,6 +116,8 @@ def read_safetensors(path: str | Path, pin: bool = False) -> tuple[dict[str, tor
         base = 8 + header_len
         metadata = header.pop("__metadata__", None) or {}
         entries = sorted(header.items(), key=lambda kv: kv[1]["data_offsets"][0])
+        if layers is not None:
+            entries = [(name, info) for name, info in entries if _layer_of(name) in layers]
 
         def view(raw: torch.Tensor, info: dict) -> torch.Tensor:
             return raw.view(_ST_DTYPES[info["dtype"]]).reshape(info["shape"])
@@ -166,7 +183,7 @@ class Checkpoint:
     full_precision: set[str] = field(default_factory=set)
 
 
-def _read_gguf(path: Path) -> Checkpoint:
+def _read_gguf(path: Path, layers: Collection[str] | None = None) -> Checkpoint:
     """GGUF: a container from the llama.cpp world. Each Q8_0 tensor is laid out in blocks of 34 bytes:
     2 bytes - a float16 multiplier, then 32 int8 values. We split these into two parts and
     handle them further the same way as the other formats."""
@@ -176,6 +193,8 @@ def _read_gguf(path: Path) -> Checkpoint:
     tensors: dict[str, torch.Tensor] = {}
     formats: dict[str, str] = {}
     for t in gguf.GGUFReader(str(path)).tensors:
+        if layers is not None and _layer_of(t.name) not in layers:
+            continue   # the file is memory-mapped, so tensors we do not touch are not read from disk
         shape = tuple(int(d) for d in reversed(t.shape))   # in GGUF the sizes are stored in reverse order
         kind = t.tensor_type.name
         data = torch.from_numpy(np.array(t.data))          # np.array: a copy from the mapped file into RAM
@@ -192,15 +211,18 @@ def _read_gguf(path: Path) -> Checkpoint:
     return Checkpoint(tensors=tensors, formats=formats)
 
 
-def read_checkpoint(path: str | Path, pin: bool = False) -> Checkpoint:
+def read_checkpoint(path: str | Path, pin: bool = False, layers: Collection[str] | None = None) -> Checkpoint:
     """pin - read straight into pinned memory (see read_safetensors). Does not apply to .gguf:
-    there the tensors are rebuilt during reading; Resident.with_home_copy will pin them later."""
+    there the tensors are rebuilt during reading; Resident.with_home_copy will pin them later.
+
+    layers - read only these layers (see read_safetensors); the result then cannot be loaded into
+    a model with load_into, it is meant for looking at individual layers."""
     path = Path(path)
     if path.suffix == ".gguf":
-        return _read_gguf(path)
+        return _read_gguf(path, layers)
     if path.suffix != ".safetensors":
         raise ValueError(f"I can read .safetensors and .gguf, but this is {path.name}")
-    tensors, metadata = read_safetensors(path, pin=pin)
+    tensors, metadata = read_safetensors(path, pin=pin, layers=layers)
 
     # Bring names to one form: "blocks.0.attn.wq.weight"
     if any(k.startswith(_COMFY_PREFIX) for k in tensors):

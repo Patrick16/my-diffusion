@@ -177,6 +177,7 @@ updating the libraries or on another machine.
 | `scripts/check_loras.py` | which LoRAs are read, which are not, and why |
 | `scripts/check_checkpoints.py` | every checkpoint produces an image |
 | `scripts/profile_step.py` | where the step time goes; with `--real` - a comparison of the multiplication modes on the real checkpoint |
+| `scripts/compare_checkpoints.py` | how the checkpoints differ from the base one layer by layer, and whether the difference is low-rank |
 
 ## Measurements (RTX 5080 Laptop 16 GB, 64 GB RAM, turbo, 8 steps)
 
@@ -252,6 +253,13 @@ Environment variables `MY_DIFFUSION_*` or a `.env` file (see `.env.example`).
   cached run stays numerically closer to the full run than a plain run with the same number of
   network passes, but the image is visibly broken by a noisy mosaic texture, while plain 8-10 steps
   give a clean image. Use fewer `steps` instead.
+- **Storing a checkpoint as "base + low-rank correction"** (to switch checkpoints in seconds instead
+  of reading another 13 GB). Measured with `scripts/compare_checkpoints.py` on five Krea 2 turbo
+  checkpoints: the difference from the base one is mostly spread over the whole matrix, not low-rank.
+  Even 1024 of 6144 singular directions leave 1.5-5% of the weights unexplained, while rounding into
+  an 8-bit format alone accounts for 0.6-3%. One checkpoint is the base within rounding, one has a
+  strong low-rank part plus a spread remainder, two have no low-rank part at all. The minutes come
+  from the cold disk, not from the format: from the OS file cache a checkpoint loads in about 7 s.
 
 ## Not implemented yet
 
