@@ -36,8 +36,9 @@ MAX_PROMPT_TOKENS = 512
 
 
 class QwenVL:
-    def __init__(self, model_dir: Path):
+    def __init__(self, model_dir: Path, pin: bool = False):
         self.model_dir = Path(model_dir)
+        self.pin = pin   # keep the compressed weights in pinned memory: copying to the GPU is several times faster
         self.model = None
         self.tokenizer = None
 
@@ -57,7 +58,7 @@ class QwenVL:
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
         config = AutoConfig.from_pretrained(self.model_dir)
 
-        tensors, metadata = read_safetensors(weights_path)
+        tensors, metadata = read_safetensors(weights_path, pin=self.pin)
         if metadata.get("quantization_format") != "quanto":
             raise RuntimeError(f"{weights_path.name}: expected the quanto format, but the header says {metadata.get('quantization_format')!r}")
 
@@ -98,7 +99,7 @@ class QwenVL:
             return
         state = {}
         for name, (tensor, scale) in self._cold.items():
-            weight = tensor.to(device)
+            weight = tensor.to(device, non_blocking=True)   # non_blocking works from pinned memory
             if scale is not None:
                 weight = weight.to(torch.bfloat16) * scale.to(device, torch.bfloat16)
             state[name] = weight

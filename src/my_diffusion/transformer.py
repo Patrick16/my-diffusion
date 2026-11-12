@@ -257,9 +257,17 @@ class Krea2Transformer(nn.Module):
     def dtype(self) -> torch.dtype:
         return torch.bfloat16
 
-    def forward(self, latent: torch.Tensor, sigma: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+    def embed_text(self, context: torch.Tensor) -> torch.Tensor:
+        """context: (B, tokens, 12, 2560) - Qwen hidden states -> (B, tokens, features): the text in the form
+        in which the network blocks accept it.
+
+        Moved out of forward, because the result depends only on the prompt - neither on the noise level
+        nor on the latent. The sampler computes it once for the whole generation, not anew at each step."""
+        return self.txtmlp(self.txtfusion(context.to(self.dtype)))
+
+    def forward(self, latent: torch.Tensor, sigma: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
         """latent: (B, 16, h, w) - noisy latent;  sigma: (B,) - noise level 0..1;
-        context: (B, tokens, 12, 2560) - Qwen hidden states.  Returns the velocity (B, 16, h, w)."""
+        text: (B, tokens, features) - the text after embed_text.  Returns the velocity (B, 16, h, w)."""
         cfg = self.cfg
         p = cfg.patch
         b, c, h, w = latent.shape
@@ -272,7 +280,7 @@ class Krea2Transformer(nn.Module):
         t = self.tmlp(timestep_embedding(sigma, cfg.tdim).unsqueeze(1).to(self.dtype))   # (B, 1, features)
         tvec = self.tproj(t)                                                              # (B, 1, 6*features)
 
-        txt = self.txtmlp(self.txtfusion(context.to(self.dtype)))                         # (B, tokens, features)
+        txt = text.to(self.dtype)
         ntxt = txt.shape[1]
 
         # positions: text gets all zeros, an image gets (0, row, column)

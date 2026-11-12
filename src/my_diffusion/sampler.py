@@ -75,6 +75,9 @@ def sample(
     x = noise
     use_cfg = guidance_scale != 1.0 and uncond is not None
     steps = len(sigmas) - 1
+    # The text does not change from step to step: we run it through the network's text part once.
+    cond = model.embed_text(cond)
+    uncond = model.embed_text(uncond) if use_cfg else None
     for i in range(steps):
         sigma, sigma_next = sigmas[i], sigmas[i + 1]
         s = torch.full((x.shape[0],), sigma, device=x.device, dtype=torch.float32)

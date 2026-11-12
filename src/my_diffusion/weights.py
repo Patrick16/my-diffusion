@@ -51,6 +51,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .pinned import ALIGN, pinned_buffer, plan_chunks
+
 logger = logging.getLogger(__name__)
 
 # Some checkpoints (saved whole from ComfyUI) keep the weights under this prefix.
@@ -75,7 +77,10 @@ _ST_DTYPES = {
 }
 
 
-def read_safetensors(path: str | Path) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
+_READ_CHUNK = 256 * 2**20
+
+
+def read_safetensors(path: str | Path, pin: bool = False) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
     """Reads a .safetensors file entirely into RAM. Returns (tensors, metadata).
 
     The file format is simple: 8 bytes - the header length, then the JSON header (name -> type,
@@ -83,7 +88,11 @@ def read_safetensors(path: str | Path) -> tuple[dict[str, torch.Tensor], dict[st
 
     Why not safetensors.load_file: it maps the file into memory (mmap) and reads lazily,
     on first access to the data. Moving to the GPU then pulls the disk in small pieces -
-    on this checkpoint it took 4 minutes instead of seconds. Here we read sequentially."""
+    on this checkpoint it took 4 minutes instead of seconds. Here we read sequentially.
+
+    pin=True: we read not into ordinary memory but straight into pinned memory (what it is and why - see
+    pinned.py): the file lands contiguously in several large chunks, and the tensors are windows into them,
+    without copying. We do this for large models that travel to the GPU and back."""
     path = Path(path)
     tensors: dict[str, torch.Tensor] = {}
     with open(path, "rb") as f:
@@ -91,13 +100,58 @@ def read_safetensors(path: str | Path) -> tuple[dict[str, torch.Tensor], dict[st
         header = json.loads(f.read(header_len))
         base = 8 + header_len
         metadata = header.pop("__metadata__", None) or {}
-        for name, info in sorted(header.items(), key=lambda kv: kv[1]["data_offsets"][0]):
+        entries = sorted(header.items(), key=lambda kv: kv[1]["data_offsets"][0])
+
+        def view(raw: torch.Tensor, info: dict) -> torch.Tensor:
+            return raw.view(_ST_DTYPES[info["dtype"]]).reshape(info["shape"])
+
+        def read_plain(info: dict) -> torch.Tensor:
             start, end = info["data_offsets"]
             raw = torch.empty(end - start, dtype=torch.uint8)
             if end > start:
                 f.seek(base + start)
                 f.readinto(raw.numpy())
-            tensors[name] = raw.view(_ST_DTYPES[info["dtype"]]).reshape(info["shape"])
+            return view(raw, info)
+
+        if not pin:
+            for name, info in entries:
+                tensors[name] = read_plain(info)
+            return tensors, metadata
+
+        # How much space in the file each tensor takes, together with the gap up to the next one:
+        # a pinned memory chunk gets a contiguous segment of the file.
+        starts = [info["data_offsets"][0] for _, info in entries]
+        data_end = max(info["data_offsets"][1] for _, info in entries) if entries else 0
+        extents = [nxt - cur for cur, nxt in zip(starts, starts[1:] + [data_end])]
+        position = 0
+        for chunk_size, count in plan_chunks([e + ALIGN for e in extents]):   # + ALIGN: a margin for aligning the start
+            group = entries[position : position + count]
+            position += count
+            # we round the segment start down: then the offsets in the chunk and in the file match in alignment
+            first = starts[position - count] // ALIGN * ALIGN
+            last = max(info["data_offsets"][1] for _, info in group)
+            chunk = pinned_buffer(chunk_size) if last > first else None
+            if chunk is None:
+                for name, info in group:
+                    tensors[name] = read_plain(info)
+                continue
+            target = memoryview(chunk.numpy())[: last - first]
+            f.seek(base + first)
+            done = 0
+            while done < len(target):   # in chunks: reading tens of gigabytes in one call is unreliable on Windows
+                got = f.readinto(target[done : done + _READ_CHUNK])
+                if not got:
+                    raise EOFError(f"{path.name}: the file is shorter than its header says")
+                done += got
+            for name, info in group:
+                start, end = info["data_offsets"]
+                if end == start:
+                    tensors[name] = view(torch.empty(0, dtype=torch.uint8), info)
+                elif start % _ST_DTYPES[info["dtype"]].itemsize:
+                    # the start is not a multiple of the number size - a window into the shared chunk is impossible, so we take a copy
+                    tensors[name] = view(chunk[start - first : end - first].clone(), info)
+                else:
+                    tensors[name] = view(chunk[start - first : end - first], info)
     return tensors, metadata
 
 
@@ -138,13 +192,15 @@ def _read_gguf(path: Path) -> Checkpoint:
     return Checkpoint(tensors=tensors, formats=formats)
 
 
-def read_checkpoint(path: str | Path) -> Checkpoint:
+def read_checkpoint(path: str | Path, pin: bool = False) -> Checkpoint:
+    """pin - read straight into pinned memory (see read_safetensors). Does not apply to .gguf:
+    there the tensors are rebuilt during reading; Resident.with_home_copy will pin them later."""
     path = Path(path)
     if path.suffix == ".gguf":
         return _read_gguf(path)
     if path.suffix != ".safetensors":
         raise ValueError(f"I can read .safetensors and .gguf, but this is {path.name}")
-    tensors, metadata = read_safetensors(path)
+    tensors, metadata = read_safetensors(path, pin=pin)
 
     # Bring names to one form: "blocks.0.attn.wq.weight"
     if any(k.startswith(_COMFY_PREFIX) for k in tensors):
@@ -362,10 +418,12 @@ class QLinear(nn.Module):
             block_scale = torch.exp2(exp.to(torch.float32) - E8M0_BIAS).to(dtype)
         elif self.block_scale is not None:
             block_scale = self.block_scale.to(dtype)
+        # Multiply in place (mul_): w here is a fresh copy (the compressed fp8/int8 were just converted
+        # to dtype), so nothing to protect, and a second temporary matrix of ~200 MB is not created.
         if block_scale is not None:
-            w = (w.view(self.out_features, -1, MXFP8_BLOCK) * block_scale.unsqueeze(-1)).view(self.out_features, self.in_features)
+            w.view(self.out_features, -1, MXFP8_BLOCK).mul_(block_scale.unsqueeze(-1))
         if self.scale is not None:
-            w = w * self.scale.to(dtype)
+            w.mul_(self.scale.to(dtype))
         for delta, strength in self.deltas:
             w = w + delta.to(dtype) * strength
         return w
