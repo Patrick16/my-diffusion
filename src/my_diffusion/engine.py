@@ -195,17 +195,24 @@ class Krea2Engine:
         shift: float | None = None,
         loras: list[tuple[str, float]] | None = None,
         enhance: bool = False,
+        guidance_interval: tuple[float, float] = (0.0, 1.0),
     ) -> dict:
+        """guidance_interval - the part of the run (as fractions of the steps) where CFG is applied;
+        only matters when guidance_scale != 1. See sampler.sample."""
         if not self.loaded:
             raise RuntimeError("the engine is not loaded yet")
         with self._lock:
-            return self._generate(prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance)
+            return self._generate(
+                prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
+                tuple(guidance_interval),
+            )
 
-    def _generate(self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance) -> dict:
+    def _generate(self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval) -> dict:
         s = self.settings
         defaults = KIND_DEFAULTS[self.kind]
         steps = steps or defaults["steps"]
         guidance_scale = defaults["guidance_scale"] if guidance_scale is None else guidance_scale
+        sampler.guided_steps(steps, guidance_interval)   # validate now: a bad interval surfaces before the heavy work
         seed = random.randint(0, MAX_SEED) if seed is None else seed
         width, height = resolve_dimensions(resolution, aspect_ratio)
         lora_files = [(self._lora(name), weight) for name, weight in loras]   # read in advance: a name error surfaces before the heavy work
@@ -247,6 +254,7 @@ class Krea2Engine:
         latent = sampler.sample(
             self.model, noise, cond.to(s.device), sigmas,
             uncond=None if uncond is None else uncond.to(s.device), guidance_scale=guidance_scale,
+            guidance_interval=guidance_interval,
         )
         timings["sample"] = time.time() - t0
         peak_vram = torch.cuda.max_memory_allocated() / 2**30
@@ -269,7 +277,7 @@ class Krea2Engine:
             "image_path": str(path),
             "width": width, "height": height, "seed": seed,
             "prompt": prompt, "enhanced_prompt": enhanced,
-            "steps": steps, "guidance_scale": guidance_scale, "shift": round(mu, 4),
+            "steps": steps, "guidance_scale": guidance_scale, "guidance_interval": list(guidance_interval), "shift": round(mu, 4),
             "checkpoint": self.checkpoint_name,
             "matmul": self.matmul if self.native_layers else "exact",   # the mode the image was actually computed with
             "loras": [{"name": f.name, "weight": w} for f, w in lora_files],

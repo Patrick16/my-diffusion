@@ -112,6 +112,14 @@ variable or with the `steps` / `guidance_scale` parameters in the request.
 `guidance_scale` here is the usual CFG, where 1.0 means "off". In Wan2GP the scale is shifted
 by one: their `guidance 3.5` is our `4.5`.
 
+**Guidance interval.** CFG calls the network twice per step. `guidance_start` / `guidance_end`
+(fractions of the steps, default `0` / `1`) limit CFG to a part of the run; steps outside it call
+the network once. `"guidance_end": 0.6` on 28 steps applies CFG to the first 17 steps and cuts
+sampling by about 20% (measured: 20.9 s -> 16.9 s at 480). It changes the image, so it is off by
+default, and it only matters when `guidance_scale` is not 1 - that is, on raw checkpoints.
+Not validated for image quality: there was no raw checkpoint to test it on, only the timing and
+the mechanics were checked (with CFG forced on a turbo checkpoint).
+
 ## LoRA
 
 ```json
@@ -235,6 +243,15 @@ the pictures are saved side by side in `outputs/ab_*.png`.
 ## Configuration
 
 Environment variables `MY_DIFFUSION_*` or a `.env` file (see `.env.example`).
+
+## Tried and rejected
+
+- **Skipping steps with a cache** (reusing the deep blocks' contribution from the previous step when
+  the first block's output changed little, as in first-block cache / TeaCache). Measured on the turbo
+  checkpoint: at 8 steps there is nothing to reuse (the reused part is 23-40% off), and at 28 steps a
+  cached run stays numerically closer to the full run than a plain run with the same number of
+  network passes, but the image is visibly broken by a noisy mosaic texture, while plain 8-10 steps
+  give a clean image. Use fewer `steps` instead.
 
 ## Not implemented yet
 
