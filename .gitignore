@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+*.egg-info/
+
+# links to the models (junctions) - created by scripts/link_models.ps1, not tracked by git
+models/
+models_converted/
+
+outputs/*
+!outputs/.gitkeep
+
+# Local documentation (Russian working notes): kept on this machine only, not tracked
+/docs/

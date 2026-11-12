@@ -1,0 +1,52 @@
+[project]
+name = "my-diffusion"
+version = "0.2.0"
+description = "Thin local backend for Krea 2 (text-to-image): its own native engine, LoRA, prompt enhancer"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    # --- core ---
+    "torch>=2.7.0",              # 2.7+ - first version with stable RTX 50xx (Blackwell) support
+    "safetensors>=0.5.0",        # VAE and Qwen weights (the Krea 2 checkpoints themselves are read by our own code, see weights.py)
+    "gguf>=0.19.0",              # reading checkpoints in .gguf format
+    "transformers>=4.57.0",      # Qwen3-VL architecture: Krea 2 text encoder and prompt enhancer
+    "accelerate>=1.1.1",         # init_empty_weights: build Qwen without allocating memory for random weights
+    "diffusers>=0.35.0",         # we take ONLY the VAE from there (AutoencoderKLQwenImage), not the pipeline
+    "sentencepiece",
+    "pillow",
+    "numpy",
+    # --- API layer ---
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2.0",
+    "pydantic-settings",
+]
+
+[project.scripts]
+my-diffusion-generate = "my_diffusion.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.uv.sources]
+# torch is installed from the PyTorch index for CUDA 12.8 (the PyPI build for Windows is CPU-only).
+# For another CUDA version, change the index accordingly (cu130 is described below).
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/my_diffusion"]
