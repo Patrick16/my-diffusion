@@ -32,6 +32,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--guidance-scale", type=float, default=None)
+    parser.add_argument("--guidance-start", type=float, default=0.0, help="fraction of the steps after which CFG starts (default 0)")
+    parser.add_argument("--guidance-end", type=float, default=1.0, help="fraction of the steps after which CFG stops (default 1); lower is faster")
     parser.add_argument("--shift", type=float, default=None, help="shift of the schedule mu; default is auto")
     parser.add_argument("--lora", action="append", default=[], metavar="NAME[:WEIGHT]", help="can be given several times")
     parser.add_argument("--enhance", action="store_true", help="first expand the prompt with Qwen")
@@ -62,6 +64,7 @@ def main() -> None:
             seed=None if args.seed is None else args.seed + i,
             steps=args.steps,
             guidance_scale=args.guidance_scale,
+            guidance_interval=(args.guidance_start, args.guidance_end),
             shift=args.shift,
             loras=[_parse_lora(v) for v in args.lora],
             enhance=args.enhance,

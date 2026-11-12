@@ -57,6 +57,15 @@ def make_noise(seed: int, channels: int, height: int, width: int) -> torch.Tenso
     return torch.randn((1, channels, height, width), generator=generator, dtype=torch.float32)
 
 
+def guided_steps(steps: int, interval: tuple[float, float]) -> tuple[int, int]:
+    """Which steps get CFG: the half-open range [first, last) of step indices for an interval given
+    as fractions of the run. (0.0, 1.0) -> (0, steps); (0.0, 0.6) with 28 steps -> (0, 17)."""
+    start, end = interval
+    if not 0.0 <= start <= end <= 1.0:
+        raise ValueError(f"guidance interval must satisfy 0 <= start <= end <= 1, got {interval}")
+    return round(start * steps), round(end * steps)
+
+
 @torch.inference_mode()
 def sample(
     model,
@@ -66,15 +75,30 @@ def sample(
     uncond: torch.Tensor | None = None,
     guidance_scale: float = 1.0,
     on_step: Callable[[int, int], None] | None = None,
+    guidance_interval: tuple[float, float] = (0.0, 1.0),
 ) -> torch.Tensor:
     """Returns the latent of the finished image (in the model's normalized space).
 
     guidance_scale > 1 enables classifier-free guidance: the network is called twice -
     with the prompt and with the negative prompt - and the result is extrapolated from the second
-    toward the first. The turbo model is distilled without CFG, so it needs guidance_scale = 1."""
+    toward the first. The turbo model is distilled without CFG, so it needs guidance_scale = 1.
+
+    guidance_interval limits CFG to a part of the run, given as fractions of the steps: (0.0, 1.0)
+    is every step, (0.0, 0.6) is the first 60% of the steps. Outside the interval the network is
+    called once per step instead of twice, so those steps cost half. Why this is reasonable: the
+    negative prompt mostly steers the composition, which is settled at the noisy steps; at the
+    last steps the two predictions nearly coincide and guidance mainly over-sharpens (see
+    Kynkaanniemi et al., "Applying Guidance in a Limited Interval", 2024). It changes the image,
+    so it is off unless asked for.
+
+    What is deliberately not here: skipping steps with a cache (reusing the deep blocks' output of the
+    previous step when the first block's output changed little). It was measured on this network and
+    rejected: the reused part is 11-40% off even between neighbouring steps, and the resulting image
+    is covered with a noisy mosaic texture, while a plain run with fewer steps stays clean."""
     x = noise
     use_cfg = guidance_scale != 1.0 and uncond is not None
     steps = len(sigmas) - 1
+    first_guided, last_guided = guided_steps(steps, guidance_interval)
     # The text does not change from step to step: we run it through the network's text part once.
     cond = model.embed_text(cond)
     uncond = model.embed_text(uncond) if use_cfg else None
@@ -82,7 +106,7 @@ def sample(
         sigma, sigma_next = sigmas[i], sigmas[i + 1]
         s = torch.full((x.shape[0],), sigma, device=x.device, dtype=torch.float32)
         v = model(x, s, cond).float()
-        if use_cfg:
+        if use_cfg and first_guided <= i < last_guided:
             v_uncond = model(x, s, uncond).float()
             v = v_uncond + guidance_scale * (v - v_uncond)
         x = x + (sigma_next - sigma) * v

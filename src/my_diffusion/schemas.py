@@ -27,6 +27,9 @@ class GenerateRequest(BaseModel):
     # None - the default for the checkpoint kind (turbo: 8 steps / 1.0, raw: 28 / 4.5)
     steps: int | None = Field(default=None, ge=1, le=100)
     guidance_scale: float | None = Field(default=None, ge=1.0, le=20.0, description="CFG; 1.0 - off")
+    # Limits CFG to a part of the run. Steps outside the interval call the network once instead of twice.
+    guidance_start: float = Field(default=0.0, ge=0.0, le=1.0, description="Fraction of the steps after which CFG starts; 0 - from the first step")
+    guidance_end: float = Field(default=1.0, ge=0.0, le=1.0, description="Fraction of the steps after which CFG stops; 1 - until the last step")
     shift: float | None = Field(default=None, description="Shift of the schedule (mu). None - automatic from the image size")
 
     loras: list[LoraSpec] = Field(default_factory=list)
@@ -42,6 +45,7 @@ class GenerateResponse(BaseModel):
     enhanced_prompt: str | None
     steps: int
     guidance_scale: float
+    guidance_interval: list[float] = Field(description="[start, end] - the part of the run where CFG was applied, as fractions of the steps")
     shift: float
     checkpoint: str
     matmul: str = Field(description="Matrix multiplication mode used: exact, fp8 or fp8_all (see MY_DIFFUSION_MATMUL)")

@@ -145,6 +145,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
         seed=request.seed,
         steps=request.steps,
         guidance_scale=request.guidance_scale,
+        guidance_interval=(request.guidance_start, request.guidance_end),
         shift=request.shift,
         loras=[(lora.name, lora.weight) for lora in request.loras],
         enhance=request.enhance_prompt,
