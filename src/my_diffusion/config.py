@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # Default is fp8_all: chosen after comparing images (scripts/profile_step.py --real).
     matmul: Literal["exact", "fp8", "fp8_all"] = "fp8_all"
 
+    # Keep model weights in "pinned" RAM: copying from it to the
+    # GPU is 6-9x faster, and switching models on the GPU takes fractions of a second instead of
+    # several seconds. Cost: ~17 GB of RAM that the system cannot give to other programs
+    # or page out to the swap file. If RAM is short, turn it off.
+    pin_memory: bool = True
+
     enhancer_max_new_tokens: int = 220
 
     # --- API ---

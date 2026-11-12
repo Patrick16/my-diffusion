@@ -65,13 +65,15 @@ class Krea2Engine:
         self.native_layers = 0               # how many layers are currently computed via the native fp8 path
         self._text_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
         self._lora_cache: OrderedDict[tuple[str, float], LoraFile] = OrderedDict()
+        self._applied_loras: list[tuple[LoraFile, float]] = []   # the set of LoRAs currently attached to the network
         self._lock = threading.Lock()   # one generation at a time: there is one GPU
 
     # ------------------------------------------------------------------ loading
     def load(self) -> None:
         s = self.settings
         t0 = time.time()
-        self.qwen = QwenVL(s.text_encoder_dir)
+        pin = s.pin_memory and s.device != "cpu"
+        self.qwen = QwenVL(s.text_encoder_dir, pin=pin)
         self.qwen.load()
         self.gpu.register("qwen", Resident.plain(self.qwen))
         logger.info("Qwen in RAM: %.1fs", time.time() - t0)
@@ -79,7 +81,7 @@ class Krea2Engine:
         t0 = time.time()
         self.vae = LatentDecoder(s.vae_path)
         self.vae.load()
-        self.gpu.register("vae", Resident.plain(self.vae))
+        self.gpu.register("vae", Resident.with_home_copy(self.vae.vae, pin=pin))
         logger.info("VAE in RAM: %.1fs", time.time() - t0)
 
         self.load_checkpoint(s.checkpoint)
@@ -95,10 +97,12 @@ class Krea2Engine:
         self.model = None
         self.gpu.residents.pop("model", None)
         self._lora_cache.clear()
+        pin = self.settings.pin_memory and self.settings.device != "cpu"
         model = Krea2Transformer()
-        load_into(model, read_checkpoint(path))
+        load_into(model, read_checkpoint(path, pin=pin))
         self.model = model
-        self.gpu.register("model", Resident.with_home_copy(model))
+        self._applied_loras = []   # the freshly built network has no LoRAs attached
+        self.gpu.register("model", Resident.with_home_copy(model, pin=pin))
         self.checkpoint_name = path.name
         logger.info("checkpoint %s in RAM: %.1fs", path.name, time.time() - t0)
         self.set_matmul(self.matmul)
@@ -219,7 +223,15 @@ class Krea2Engine:
         # 2. noise -> latent
         t0 = time.time()
         self.gpu.use("model")
-        apply_loras(self.model, lora_files, s.device)
+        # The same LoRA set with the same weights as in the previous request is already attached and sits
+        # on the GPU - we do not move it again. We compare the objects themselves (is), not the names:
+        # a file changed on disk is read into a new object (see _lora).
+        same = len(lora_files) == len(self._applied_loras) and all(
+            new is old and w_new == w_old for (new, w_new), (old, w_old) in zip(lora_files, self._applied_loras)
+        )
+        if not same:
+            apply_loras(self.model, lora_files, s.device)
+            self._applied_loras = list(lora_files)
         timings["load_model"] = time.time() - t0
 
         lat_h, lat_w = height // VAE_SCALE, width // VAE_SCALE

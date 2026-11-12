@@ -7,8 +7,11 @@ only ONE large model lives on the GPU at any moment; the others stay in RAM.
 Switching models must be cheap. A plain module.to("cpu") copies 12.6 GB back
 to RAM (~4 s) - that is extra work, since the original is already there. So we keep
 a RAM copy permanently (the "home"), send a duplicate to the GPU, and on eviction we simply
-discard the duplicate and return the references to the "home". Eviction is instant, and loading
-the network takes about 3 s."""
+discard the duplicate and return the references to the "home". Eviction is instant.
+
+Loading is a copy RAM -> GPU, and its speed depends on which memory the "home" lives in. From ordinary
+memory it is ~4 GB/s (the network takes about 3 s), from pinned memory - 26-36 GB/s (the network takes about
+0.5 s). Therefore the "home" of all three models is pinned; for what this memory is and what we pay for it - see pinned.py."""
 
 from __future__ import annotations
 
@@ -18,6 +21,8 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+
+from .pinned import pin_tensors
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +40,12 @@ class Resident:
         return cls(lambda device: module.to(device), lambda: module.to("cpu"))
 
     @classmethod
-    def with_home_copy(cls, module: nn.Module) -> "Resident":
-        """Fast variant: the RAM copy stays in place (see the module description)."""
+    def with_home_copy(cls, module: nn.Module, pin: bool = False) -> "Resident":
+        """Fast variant: the RAM copy stays in place (see the module description).
+
+        pin=True: the "home" must live in pinned memory - transfers to the GPU from it are several times
+        faster (see pinned.py). Tensors that are not pinned yet (the checkpoint was read without
+        pin, or it is a .gguf) are moved into pinned memory here."""
         home: list[tuple[nn.Module, str, str, torch.Tensor]] = []
         for sub in module.modules():
             for key, param in sub._parameters.items():
@@ -45,6 +54,9 @@ class Resident:
             for key, buf in sub._buffers.items():
                 if buf is not None:
                     home.append((sub, "buffer", key, buf))
+        if pin:
+            pinned = pin_tensors([tensor for _, _, _, tensor in home])
+            home = [(sub, kind, key, tensor) for (sub, kind, key, _), tensor in zip(home, pinned)]
 
         def place(tensors) -> None:
             for (sub, kind, key, _), tensor in zip(home, tensors):
@@ -53,6 +65,8 @@ class Resident:
                 else:
                     sub._buffers[key] = tensor
 
+        if pin:
+            place([t for _, _, _, t in home])   # the module now points at the pinned copies
         return cls(
             to_gpu=lambda device: place([t.to(device, non_blocking=True) for _, _, _, t in home]),
             to_cpu=lambda: place([t for _, _, _, t in home]),

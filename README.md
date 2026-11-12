@@ -53,6 +53,7 @@ Every module starts with an explanation of what it does and why.
 | `vae.py` | Latent -> pixels. The only thing taken from `diffusers`. |
 | `lora.py` | Parsing LoRA files (7 key naming schemes) and attaching them to the layers. |
 | `memory.py` | One large model on the GPU at a time; switching without unnecessary copies. |
+| `pinned.py` | Pinned RAM: the weights move from it to the GPU in fractions of a second. |
 | `engine.py` | Combines everything into `generate()`. Text cache, LoRA cache, timing measurements. |
 | `resolutions.py` | Resolution + aspect ratio -> width and height. |
 | `api.py`, `schemas.py`, `cli.py` | HTTP and the command line on top of the engine. |
@@ -177,12 +178,29 @@ updating the libraries or on another machine.
 | 720 (1280x720) | ~15 s | ~1.5 s | 13.3 GB |
 | 1080 (1920x1088) | ~38 s | ~1 s (bf16) | 13.8 GB |
 
-A repeated request with the same prompt (another seed) at 720 takes about 20 s in total.
+The table above is the initial state of the engine (exact multiplication, ordinary memory). After two
+optimizations - fast multiplication and pinned memory, described below - a whole request takes:
+
+| Resolution | New prompt | Same prompt, different seed | Of which sampling |
+|---|---|---|---|
+| 480 (736x560) | 5.2 s | 3.9 s | 3.0 s |
+| 720 (1280x720) | 11.1 s | 9.8 s | 8.3 s |
+| 1080 (1920x1088) | 30.1 s | 29.1 s | 26.3 s |
+
+For comparison: a repeated request at 720 used to take about 20 s.
 The first load of a checkpoint depends on the disk: 12.6 GB are read sequentially.
+
+### Pinned memory (`MY_DIFFUSION_PIN_MEMORY`)
+
+One large model lives on the GPU at a time, so every request moves the models between
+RAM and the GPU. From ordinary RAM this is ~4 GB/s (the network takes about 3 s), from
+pinned memory - 26-36 GB/s (about 0.5 s). That is why the weights of all three models live
+in pinned memory. The cost: about 19 GB of RAM that the system cannot give to other programs
+or page out to swap. If RAM is short - `MY_DIFFUSION_PIN_MEMORY=false`.
 
 ### Multiplication mode (`MY_DIFFUSION_MATMUL`)
 
-The table above was measured with the exact method (`exact`): the compressed weights of each layer are unpacked into bf16 and multiplied as usual. NVIDIA 50-series
+Exact mode (`exact`): the compressed weights of each layer are unpacked into bf16 and multiplied as usual. NVIDIA 50-series
 GPUs can multiply mxfp8 matrices directly in compressed form - these are the `fp8` and `fp8_all` modes. `fp8_all` is enabled by default:
 
 | Mode | Sampling 480 / 720 / 1080 | What changes |
