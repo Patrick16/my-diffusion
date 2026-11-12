@@ -19,14 +19,52 @@ match the tensor names in the checkpoint - that is why the weights load directly
 
 from __future__ import annotations
 
+import inspect
 import math
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from .weights import QLinear, shared_input
+
+# Which kernel computes attention.
+#
+# F.scaled_dot_product_attention is not one algorithm but several ready-made "kernels", from which
+# torch picks by itself. The best known one, FlashAttention, is not included in the torch build for Windows, and by
+# default torch takes the "efficient" kernel here. But the build also has a kernel from NVIDIA's
+# cuDNN library: torch tries it last, but on this network it is 2-2.4x faster (measured per block:
+# 480p 2.6 -> 1.3 ms, 720p 10.8 -> 4.7 ms, 1080p 52.6 -> 21.7 ms). The accuracy is the same: both kernels
+# are equally far from a float32 reference; they differ from each other only at the rounding level (~0.1%).
+#
+#   cudnn   - try the cuDNN kernel first; if it does not accept the input (for example, length 1) -
+#             torch itself moves on to the next kernel in the list;
+#   default - whatever torch picks (on Windows that is "efficient"): for comparison with ComfyUI.
+#
+# The cuDNN kernel has a cost: for each new input shape (that is, a new sequence length)
+# it is prepared once for ~0.2-0.4 s, after which it works instantly. Hence two rules:
+#   - we enable it only in the 28 main blocks, where attention costs tens of milliseconds per call.
+#     In the text part (txtfusion) attention takes fractions of a millisecond, and there are two new shapes
+#     per prompt length there - the preparation would cost more than it saves;
+#   - the preparation is remembered separately in each thread, so the server runs all generations
+#     in the same thread (see api.py).
+ATTENTION_KERNELS = ("cudnn", "default")
+CUDNN_FIRST = [SDPBackend.CUDNN_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+_CAN_SET_PRIORITY = "set_priority" in inspect.signature(sdpa_kernel).parameters
+
+
+def set_attention_kernel(blocks: nn.Module, kernel: str) -> None:
+    """Selects the attention kernel (see ATTENTION_KERNELS) for all attention layers inside blocks.
+    For the Krea 2 network, model.blocks is passed here - the main blocks, without the text part."""
+    if kernel not in ATTENTION_KERNELS:
+        raise ValueError(f"unknown attention kernel {kernel!r}; available: {ATTENTION_KERNELS}")
+    if kernel == "cudnn" and not _CAN_SET_PRIORITY:
+        raise RuntimeError("the cudnn attention kernel needs a newer torch (no sdpa_kernel(set_priority=...)); set MY_DIFFUSION_ATTENTION=default")
+    for module in blocks.modules():
+        if isinstance(module, Attention):
+            module.kernel = kernel
 
 
 @dataclass(frozen=True)
@@ -120,6 +158,7 @@ class Attention(nn.Module):
         self.gate = QLinear(dim, dim, bias=False)
         self.qknorm = QKNorm(self.headdim)
         self.wo = QLinear(dim, dim, bias=False)
+        self.kernel = "default"   # attention kernel; set by set_attention_kernel
 
     def forward(self, x: torch.Tensor, rope: torch.Tensor | None = None) -> torch.Tensor:
         b, n, _ = x.shape
@@ -134,7 +173,11 @@ class Attention(nn.Module):
             rep = self.heads // self.kvheads
             k = k.repeat_interleave(rep, dim=1)
             v = v.repeat_interleave(rep, dim=1)
-        out = F.scaled_dot_product_attention(q, k, v)
+        if self.kernel == "cudnn":
+            with sdpa_kernel(CUDNN_FIRST, set_priority=True):
+                out = F.scaled_dot_product_attention(q, k, v)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v)
         out = out.transpose(1, 2).reshape(b, n, self.heads * self.headdim)
         # the attention output is additionally weighted by a sigmoid gate
         return self.wo(out * torch.sigmoid(self.gate(x)))

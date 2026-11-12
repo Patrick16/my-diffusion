@@ -9,7 +9,9 @@ Interactive documentation of all endpoints: http://127.0.0.1:8000/docs"""
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -32,6 +34,13 @@ settings = Settings()
 engine = Krea2Engine(settings)
 _load_error: str | None = None
 
+# All GPU work runs in ONE persistent thread. There is one GPU, so computing
+# in parallel is impossible anyway (requests just wait in this thread's queue), and persistence
+# of the thread matters for speed: the cuDNN attention kernel remembers its setup for each sequence length
+# separately in each thread (~0.2-0.4 s, see transformer.py), and in a "random"
+# thread from a shared pool it would pay for it again.
+_gpu_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gpu")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,7 +48,7 @@ async def lifespan(app: FastAPI):
     async def load() -> None:
         global _load_error
         try:
-            await asyncio.to_thread(engine.load)
+            await _in_gpu_thread(engine.load)
         except Exception as exc:  # noqa: BLE001 - we show the reason in /health instead of silently crashing the server
             logging.exception("could not load the models")
             _load_error = f"{type(exc).__name__}: {exc}"
@@ -61,10 +70,14 @@ def _require_loaded() -> None:
         raise HTTPException(503, "Models are still loading, try again in a few seconds")
 
 
+async def _in_gpu_thread(func, *args, **kwargs):
+    return await asyncio.get_running_loop().run_in_executor(_gpu_thread, functools.partial(func, *args, **kwargs))
+
+
 async def _run(func, *args, **kwargs):
     """Calls the engine, translating its errors into HTTP codes."""
     try:
-        return await asyncio.to_thread(func, *args, **kwargs)
+        return await _in_gpu_thread(func, *args, **kwargs)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except (ValueError, NotImplementedError) as exc:
@@ -77,7 +90,7 @@ async def health() -> dict:
     return {
         "status": status, "error": _load_error, "checkpoint": engine.checkpoint_name,
         "kind": engine.kind if engine.loaded else None,
-        "matmul": engine.matmul, "native_layers": engine.native_layers,
+        "matmul": engine.matmul, "native_layers": engine.native_layers, "attention": settings.attention,
     }
 
 

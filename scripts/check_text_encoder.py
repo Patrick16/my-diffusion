@@ -40,6 +40,14 @@ def main() -> None:
           f"mean {cond.float().mean().item():.4f}, std {cond.float().std().item():.3f}, nan={bool(cond.isnan().any())}")
     print(f"  std over 12 layers: {[round(v, 2) for v in cond.float().std(dim=(0, 1, 3)).tolist()]}")
 
+    # The model must survive eviction from the GPU and coming back: this happens on every
+    # new prompt after the first generation. The result must match the first one bit for bit.
+    qwen.to("cpu")
+    qwen.to(settings.device)
+    again = qwen.encode(prompt)
+    print(f"after eviction and reloading on {settings.device}: encode matches the first one: {torch.equal(cond, again)}")
+    assert torch.equal(cond, again), "after returning to the GPU, Qwen encodes differently"
+
     t0 = time.time()
     answer = qwen.chat("You are a helpful assistant.", "Describe a fox in the snow in one sentence.", max_new_tokens=60, temperature=0.0)
     print(f"chat ({time.time() - t0:.1f}s): {answer}")

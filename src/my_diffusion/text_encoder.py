@@ -87,6 +87,9 @@ class QwenVL:
 
         self._cold = cold
         self.model = model.eval()
+        # Auxiliary model tables that are not in the weights file (for example, the frequencies of positional
+        # encoding): the model builds them itself on creation. We remember them - see to("cpu").
+        self._built_in = {name: buf for name, buf in model.named_buffers() if name not in cold}
         logger.info("Qwen3-VL loaded from %s", weights_path.name)
 
     def to(self, device: str) -> None:
@@ -96,6 +99,12 @@ class QwenVL:
         would repeat on every new token. In RAM only the compressed copy is kept."""
         if str(device) == "cpu":
             self.model.to("meta")   # drop the GPU copy; the original stays in self._cold
+            # to("meta") erases everything, including the tables that are not in self._cold. We restore them,
+            # otherwise after reloading the model would crash on the very first call
+            # ("Cannot copy out of meta tensor") - that is, on the second new prompt in a row.
+            for name, buf in self._built_in.items():
+                owner, _, leaf = name.rpartition(".")
+                self.model.get_submodule(owner)._buffers[leaf] = buf
             return
         state = {}
         for name, (tensor, scale) in self._cold.items():

@@ -11,6 +11,7 @@ import logging
 from .config import Settings
 from .engine import Krea2Engine
 from .resolutions import ASPECT_RATIOS, RESOLUTION_TIERS
+from .transformer import ATTENTION_KERNELS
 from .weights import MATMUL_MODES
 
 
@@ -37,6 +38,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=None, help="file in models/checkpoints")
     parser.add_argument("--count", type=int, default=1, help="how many images in a row (seed increases by 1 each time)")
     parser.add_argument("--matmul", choices=MATMUL_MODES, default=None, help="matrix multiplication mode; default from the settings")
+    parser.add_argument("--attention", choices=ATTENTION_KERNELS, default=None, help="attention kernel; default from the settings")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
@@ -46,6 +48,8 @@ def main() -> None:
         settings.checkpoint = args.checkpoint
     if args.matmul:
         settings.matmul = args.matmul
+    if args.attention:
+        settings.attention = args.attention
     engine = Krea2Engine(settings)
     engine.load()
 
