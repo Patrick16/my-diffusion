@@ -178,14 +178,15 @@ updating the libraries or on another machine.
 | 720 (1280x720) | ~15 s | ~1.5 s | 13.3 GB |
 | 1080 (1920x1088) | ~38 s | ~1 s (bf16) | 13.8 GB |
 
-The table above is the initial state of the engine (exact multiplication, ordinary memory). After two
-optimizations - fast multiplication and pinned memory, described below - a whole request takes:
+The table above is the initial state of the engine (exact multiplication, ordinary memory, the default
+attention kernel). After three optimizations - fast multiplication, pinned memory and a fast attention
+kernel, described below - a whole request takes:
 
 | Resolution | New prompt | Same prompt, different seed | Of which sampling |
 |---|---|---|---|
-| 480 (736x560) | 5.2 s | 3.9 s | 3.0 s |
-| 720 (1280x720) | 11.1 s | 9.8 s | 8.3 s |
-| 1080 (1920x1088) | 30.1 s | 29.1 s | 26.3 s |
+| 480 (736x560) | 4.9 s | 3.9 s | 2.8 s |
+| 720 (1280x720) | 9.9 s | 8.9 s | 7.2 s |
+| 1080 (1920x1088) | ~23 s | 22.2 s | 19.8 s |
 
 For comparison: a repeated request at 720 used to take about 20 s.
 The first load of a checkpoint depends on the disk: 12.6 GB are read sequentially.
@@ -197,6 +198,22 @@ RAM and the GPU. From ordinary RAM this is ~4 GB/s (the network takes about 3 s)
 pinned memory - 26-36 GB/s (about 0.5 s). That is why the weights of all three models live
 in pinned memory. The cost: about 19 GB of RAM that the system cannot give to other programs
 or page out to swap. If RAM is short - `MY_DIFFUSION_PIN_MEMORY=false`.
+
+### Attention kernel (`MY_DIFFUSION_ATTENTION`)
+
+torch computes attention with one of several ready-made "kernels". By default on Windows torch uses the
+`efficient` kernel (FlashAttention is not included in the Windows build). The same build has a kernel from
+NVIDIA's cuDNN library - it is 2-2.4 times faster, and we put it first (`cudnn`):
+
+| Kernel | Sampling 480 / 720 / 1080 (`fp8_all` mode) |
+|---|---|
+| `default` | 3.0 / 8.3 / 26.3 s |
+| `cudnn` (default) | 2.8 / 7.2 / 19.8 s |
+
+The accuracy of the kernels is the same; they differ from each other only at the rounding level (in the `exact` mode
+the pictures differ by 41-44 dB PSNR - not visible to the eye). A peculiarity of `cudnn`: for each new
+sequence length (a new resolution or a prompt of a different length) it is prepared once, taking
+0.2-0.4 s. To compare with ComfyUI, set `MY_DIFFUSION_ATTENTION=default`.
 
 ### Multiplication mode (`MY_DIFFUSION_MATMUL`)
 

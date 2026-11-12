@@ -27,7 +27,7 @@ from .lora import LoraFile, apply_loras, load_lora
 from .memory import GpuSlot, Resident
 from .resolutions import resolve_dimensions
 from .text_encoder import QwenVL
-from .transformer import Krea2Transformer
+from .transformer import Krea2Transformer, set_attention_kernel
 from .vae import LATENT_CHANNELS, VAE_SCALE, LatentDecoder
 from .weights import load_into, read_checkpoint, set_matmul
 
@@ -106,6 +106,8 @@ class Krea2Engine:
         self.checkpoint_name = path.name
         logger.info("checkpoint %s in RAM: %.1fs", path.name, time.time() - t0)
         self.set_matmul(self.matmul)
+        set_attention_kernel(model.blocks, self.settings.attention)   # only the main blocks, see transformer.py
+        logger.info("attention: kernel %s", self.settings.attention)
 
     def set_matmul(self, mode: str) -> None:
         """Select the matrix multiplication mode (exact / fp8 / fp8_all, see weights.py). It can be changed

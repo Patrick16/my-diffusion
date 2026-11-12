@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # Default is fp8_all: chosen after comparing images (scripts/profile_step.py --real).
     matmul: Literal["exact", "fp8", "fp8_all"] = "fp8_all"
 
+    # Which kernel computes the network's attention (details at the top of transformer.py):
+    #   cudnn   - the kernel from NVIDIA's cuDNN library: 2-2.4x faster, the result differs
+    #             from default only at the rounding level;
+    #   default - whatever torch picks; for comparison with ComfyUI.
+    attention: Literal["cudnn", "default"] = "cudnn"
+
     # Keep model weights in "pinned" RAM: copying from it to the
     # GPU is 6-9x faster, and switching models on the GPU takes fractions of a second instead of
     # several seconds. Cost: ~17 GB of RAM that the system cannot give to other programs
