@@ -10,7 +10,7 @@ import logging
 import math
 from pathlib import Path
 
-from .config import Settings
+from .config import load_settings
 from .engine import Krea2Engine
 from .imaging import load_rgb
 from .resolutions import ASPECT_RATIOS, RESOLUTION_TIERS
@@ -74,7 +74,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
-    settings = Settings()
+    settings = load_settings().settings   # with the settings saved through the server's config API on top
     if args.checkpoint:
         settings.checkpoint = args.checkpoint
     if args.matmul:
