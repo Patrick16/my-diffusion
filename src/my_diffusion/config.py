@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     #             edits with references, but the picture differs from cudnn. Needs the optional package:
     #             `uv sync --group sage2`. Never chosen automatically.
     attention: Literal["cudnn", "default", "sage2"] = "cudnn"
+    # Only with attention=sage2: sequences (text + picture + reference tokens) shorter than this still go to cudnn.
+    # Below ~6000 tokens sage2 saves under 10% of the sampling time, and with cudnn those pictures stay exactly
+    # the same as without sage2. 6000 leaves 480 and 720 text-to-image and one-reference edits at 480 on cudnn;
+    # 1080 (8200 tokens) and edits at 720 (7500+) use sage2. 0 = sage2 everywhere.
+    attention_sage2_min_tokens: int = Field(default=6000, ge=0)
 
     # Keep model weights in "pinned" RAM: copying from it to the
     # GPU is 6-9x faster, and switching models on the GPU takes fractions of a second instead of

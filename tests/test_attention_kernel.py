@@ -48,6 +48,9 @@ def test_settings_accept_every_kernel() -> None:
     for kernel in ATTENTION_KERNELS:
         assert Settings(attention=kernel).attention == kernel
     assert Settings.model_fields["attention"].default == "cudnn"   # sage2 is opt-in
+    assert Settings().attention_sage2_min_tokens == 6000
+    with pytest.raises(ValueError):
+        Settings(attention_sage2_min_tokens=-1)
 
 
 def test_unknown_kernel_is_rejected() -> None:

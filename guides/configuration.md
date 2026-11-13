@@ -27,7 +27,8 @@ defaults from `src/my_diffusion/config.py` are used.
 | Variable | Default | Meaning |
 |---|---|---|
 | `MY_DIFFUSION_MATMUL` | `fp8_all` | `exact`, `fp8` or `fp8_all`; fast modes need mxfp8 checkpoints and an NVIDIA 50-series GPU, otherwise use `exact` |
-| `MY_DIFFUSION_ATTENTION` | `cudnn` | `cudnn` or `default` (the torch choice, for comparison with ComfyUI) |
+| `MY_DIFFUSION_ATTENTION` | `cudnn` | `cudnn`, `default` (the torch choice, for comparison with ComfyUI) or `sage2` (optional approximate kernel, faster on large pictures; needs `uv sync --group sage2`) |
+| `MY_DIFFUSION_ATTENTION_SAGE2_MIN_TOKENS` | `6000` | only with `sage2`: shorter sequences still use `cudnn` (480 and 720 text-to-image stay unchanged); `0` = `sage2` everywhere |
 | `MY_DIFFUSION_PIN_MEMORY` | `true` | keep weights in pinned RAM (faster model switching, ~19 GB of RAM); set `false` if RAM is short |
 | `MY_DIFFUSION_LORA_STREAMING` | `true` | stream LoRA pairs to the GPU block by block (less VRAM, slightly slower) |
 

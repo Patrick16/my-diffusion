@@ -48,6 +48,39 @@ the `exact` mode the pictures differ by 41-44 dB PSNR - not visible to the eye).
 `cudnn`: for each new sequence length (a new resolution or a prompt of a different length) it is
 prepared once, taking 0.2-0.4 s. To compare with ComfyUI, set `MY_DIFFUSION_ATTENTION=default`.
 
+### Optional: `sage2` (SageAttention 2)
+
+`sage2` is a third kernel, off by default and not installed by default. Unlike the two above it is an
+approximation: it quantizes queries and keys to int8 and the attention weights and values to fp8, and
+multiplies them on the tensor cores. One attention call becomes 1.9-2.5 times faster than `cudnn`, but
+attention is only a part of a step, so the sampling gains less - and more on long sequences:
+
+| Case (tokens) | `cudnn` | `sage2` | Gain |
+|---|---|---|---|
+| 480 (1600) | 2.9 s | 2.8 s | 3% |
+| 720 (3600) | 7.3 s | 6.9 s | 6% |
+| 1080 (8200) | 20.4 s | 17.8 s | 13% |
+| edit at 720, one reference (7600-7800) | 21.6-23.8 s | 19.7-20.3 s | 9-15% |
+
+The picture changes: with the same seed `sage2` gives a different variant of it (PSNR 17-34 dB against
+`cudnn`). That is not a loss of quality: the exact `default` kernel moves the picture just as far from
+`cudnn` (19-29 dB), because sampling amplifies any small difference in the first steps. In the checked
+pictures fine detail, lettering and the identity of a face in an edit were the same as with `cudnn`.
+The peak VRAM is the same, so `sage2` does not make larger sizes fit.
+
+To use it (Windows, NVIDIA GPU):
+
+```
+uv sync --group sage2
+MY_DIFFUSION_ATTENTION=sage2
+```
+
+`MY_DIFFUSION_ATTENTION_SAGE2_MIN_TOKENS` (default 6000) keeps short sequences on `cudnn`, where the gain is
+small: 480 and 720 text-to-image and one-reference edits at 480 then give exactly the same pictures as without
+`sage2`; 1080 and edits at 720 use it. Note that a plain `uv sync` or `uv run` removes the optional package
+again - use `uv sync --group sage2` / `uv run --group sage2`. To compare the kernels on your own machine:
+`uv run --group sage2 python scripts/check_attention.py run`, then `... summary`.
+
 ## Multiplication mode (`MY_DIFFUSION_MATMUL`)
 
 Exact mode (`exact`): the compressed weights of each layer are unpacked into bf16 and multiplied as

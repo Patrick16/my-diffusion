@@ -179,8 +179,12 @@ class Krea2Engine:
         self.checkpoint_name = path.name
         logger.info("checkpoint %s in RAM: %.1fs", path.name, time.time() - t0)
         self.set_matmul(self.matmul)
-        set_attention_kernel(model.blocks, self.settings.attention)   # only the main blocks, see transformer.py
-        logger.info("attention: kernel %s", self.settings.attention)
+        s = self.settings
+        set_attention_kernel(model.blocks, s.attention, s.attention_sage2_min_tokens)   # only the main blocks, see transformer.py
+        if s.attention == "sage2":
+            logger.info("attention: kernel sage2 from %d tokens, cudnn below", s.attention_sage2_min_tokens)
+        else:
+            logger.info("attention: kernel %s", s.attention)
 
     def set_matmul(self, mode: str) -> None:
         """Select the matrix multiplication mode (exact / fp8 / fp8_all, see weights.py). It can be changed
