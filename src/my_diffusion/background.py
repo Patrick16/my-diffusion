@@ -68,11 +68,13 @@ def subject_mask(image: Image.Image, *, path: Path | None = None,
     return mask.resize(rgb.size, Image.Resampling.BICUBIC)
 
 
-def remove_background(image: Image.Image, fill: tuple[int, int, int] = (255, 255, 255)) -> Image.Image:
-    """The subject of the picture on a flat `fill` background; returns an RGB image of the same size."""
+def remove_background(image: Image.Image, fill: tuple[int, int, int] = (255, 255, 255), *,
+                      path: Path | None = None) -> Image.Image:
+    """The subject of the picture on a flat `fill` background; returns an RGB image of the same size.
+    path - the u2net model file; None means the default from the environment (model_path())."""
     fill = tuple(int(c) for c in fill)
     if len(fill) != 3 or not all(0 <= c <= 255 for c in fill):
         raise ValueError(f"fill must be an (R, G, B) tuple of 0..255 values, got {fill!r}")
     rgb = image.convert("RGB")
-    mask = subject_mask(rgb)
+    mask = subject_mask(rgb, path=path)
     return Image.composite(rgb, Image.new("RGB", rgb.size, fill), mask)

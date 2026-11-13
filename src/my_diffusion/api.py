@@ -174,6 +174,12 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
         raise HTTPException(400, "aspect_ratio 'auto' needs references")
     if request.aspect_ratio == "auto" and request.reference_mode != "scene":
         raise HTTPException(400, "aspect_ratio 'auto' needs reference_mode 'scene'")
+    outpaint = request.outpaint
+    if outpaint is not None and any(outpaint.model_dump().values()):
+        if not request.references:
+            raise HTTPException(400, "outpaint needs references")
+        if request.reference_mode != "scene":
+            raise HTTPException(400, "outpaint needs reference_mode 'scene'")
     if request.mask is not None and request.init_image is None:
         raise HTTPException(400, "mask needs init_image")
     if request.strength is not None and request.init_image is None:
@@ -202,5 +208,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
         feather=request.feather,
         references=references,
         reference_mode=request.reference_mode,
+        outpaint=None if outpaint is None else (outpaint.top, outpaint.bottom, outpaint.left, outpaint.right),
+        remove_background=request.remove_background,
     )
     return GenerateResponse(**result)
