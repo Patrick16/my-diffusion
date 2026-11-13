@@ -14,6 +14,7 @@ are cached: repeating the same prompt (for example, with another seed) does not 
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import logging
 import random
@@ -27,7 +28,7 @@ import torch
 from PIL import Image
 
 from . import background, cancellation, imaging, sampler
-from .config import Settings
+from .config import Settings, inside_folder
 from .imaging import cover_crop
 from .lora import LoraFile, apply_loras, load_lora, truncate_rank
 from .memory import GpuSlot, Resident
@@ -125,12 +126,17 @@ def normalize_outpaint(outpaint, references: list, reference_mode: str) -> imagi
 
 class Krea2Engine:
     def __init__(self, settings: Settings):
+        # Replaced as a whole by apply_settings (the config API), under the lock: it never changes while a
+        # generation runs.
         self.settings = settings
         self.gpu = GpuSlot(settings.device)
         self.qwen: QwenVL | None = None
         self.model: Krea2Transformer | None = None
         self.vae: LatentDecoder | None = None
         self.checkpoint_name: str | None = None
+        self.checkpoint_file: Path | None = None     # the loaded checkpoint's real path
+        self._checkpoint_request: str | None = None  # ... and the name it was asked for by (may include a subfolder)
+        self._attention: tuple[str, int] | None = None   # the kernel and sage2 threshold set on the loaded network
         self.matmul: str = settings.matmul   # matrix multiplication mode; changed via set_matmul
         self.native_layers = 0               # how many layers are currently computed via the native fp8 path
         self._text_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
@@ -142,7 +148,8 @@ class Krea2Engine:
         self._lock = threading.Lock()   # one generation at a time: there is one GPU
 
     # ------------------------------------------------------------------ loading
-    def load(self) -> None:
+    def load(self, checkpoint: str | None = None) -> None:
+        """Reads all three models into RAM. checkpoint - another file than settings.checkpoint (see apply_settings)."""
         s = self.settings
         t0 = time.time()
         pin = s.pin_memory and s.device != "cpu"
@@ -157,12 +164,101 @@ class Krea2Engine:
         self.gpu.register("vae", Resident.with_home_copy(self.vae.vae, pin=pin))
         logger.info("VAE in RAM: %.1fs", time.time() - t0)
 
-        self.load_checkpoint(s.checkpoint)
+        self.load_checkpoint(checkpoint or s.checkpoint)
         s.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def unload(self) -> None:
+        """Drops all three models and everything computed with them, so that load() can read them anew."""
+        if self.gpu.active is not None:
+            self.gpu.release()
+        self.gpu.residents.clear()
+        self.qwen = self.vae = self.model = None
+        self.checkpoint_name = self.checkpoint_file = self._attention = None
+        self._text_cache.clear()    # encodings of the old text encoder
+        self._image_cache.clear()
+        self._lora_cache.clear()
+        self._applied_loras = []
+        gc.collect()   # the old weights (pinned RAM) must be gone before the new ones are read
+
+    # ------------------------------------------------------------------ settings changed at run time
+    def reload_plan(self, new: Settings) -> str:
+        """What switching to `new` settings would read from disk again: "none", "checkpoint" or "all".
+
+        "all" - the text encoder, the VAE and the checkpoint: their paths or the pinning changed, or the engine
+        has no models (the load at start failed), in which case any change retries the load. "checkpoint" - the
+        checkpoint settings changed and point at another file than the loaded one. A checkpoint switched by
+        load_checkpoint (POST /checkpoints/load) is left alone as long as the checkpoint settings stay as they are."""
+        old = self.settings
+        if not self.loaded:
+            return "all"
+
+        def models(s: Settings) -> tuple:
+            return s.text_encoder_dir, s.vae_path, s.pin_memory and s.device != "cpu"
+
+        if models(old) != models(new):
+            return "all"
+        if (old.checkpoint, old.checkpoint_dir) != (new.checkpoint, new.checkpoint_dir):
+            try:
+                target = inside_folder(new.checkpoint_dir, new.checkpoint)
+            except (ValueError, FileNotFoundError):
+                return "checkpoint"   # the reload will report the missing file
+            if target != self.checkpoint_file:
+                return "checkpoint"
+        return "none"
+
+    def apply_settings(self, new: Settings) -> str:
+        """Switches the engine to `new` settings and brings the loaded models in line with them: the matmul mode
+        and the attention kernel are set again, the checkpoint or all the models are read again when the settings
+        that name them changed (see reload_plan). Returns what was reloaded.
+
+        Call it on this engine's own thread (the GPU slot's thread). It waits for the lock, so it runs between
+        two generations and a running one ends with the settings it started with. All or nothing: if the new
+        settings cannot be applied, the old ones are put back - with another reload if a reload had begun - and
+        the error is raised. Only if that fails too is the engine left without models (`loaded` is False)."""
+        with self._lock:
+            old = self.settings
+            plan = self.reload_plan(new)
+            # What is loaded now: the file to come back to if the new settings fail.
+            was_loaded = self.loaded
+            had_file = self.checkpoint_file
+            had_request = self._checkpoint_request if was_loaded else None
+            checkpoint_changed = (old.checkpoint, old.checkpoint_dir) != (new.checkpoint, new.checkpoint_dir)
+            self.settings = new
+            try:
+                # A full reload keeps a checkpoint switched by hand, unless the checkpoint settings changed too.
+                self._sync(plan, None if checkpoint_changed else had_request)
+            except BaseException:
+                self.settings = old
+                if not was_loaded:
+                    raise   # there was nothing loaded to come back to
+                if plan == "checkpoint" and self.loaded and self.checkpoint_file == had_file:
+                    plan = "none"   # the new file was refused before the old network was dropped
+                try:
+                    self._sync(plan, had_request)
+                except Exception:   # noqa: BLE001 - the first error is the one to report
+                    logger.exception("could not put the previous settings back")
+                raise
+            return plan
+
+    def _sync(self, plan: str, checkpoint: str | None) -> None:
+        """Makes the loaded models match self.settings. checkpoint - the file to load instead of settings.checkpoint."""
+        s = self.settings
+        if plan == "all":
+            self.unload()
+            self.matmul = s.matmul
+            self.load(checkpoint)
+        elif plan == "checkpoint":
+            self.matmul = s.matmul
+            self.load_checkpoint(checkpoint or s.checkpoint)
+        elif self.loaded:
+            if self.matmul != s.matmul:
+                self.set_matmul(s.matmul)
+            if self._attention != (s.attention, s.attention_sage2_min_tokens):
+                self.set_attention()
 
     def load_checkpoint(self, name: str) -> None:
         """Reads the checkpoint from disk into RAM (it will move to the GPU on the first generation)."""
-        path = self._inside(self.settings.models_dir / "checkpoints", name)
+        path = self._inside(self.settings.checkpoint_dir, name)
         t0 = time.time()
         if self.gpu.active == "model":
             self.gpu.release()
@@ -177,10 +273,18 @@ class Krea2Engine:
         self._applied_loras = []   # the freshly built network has no LoRAs attached
         self.gpu.register("model", Resident.with_home_copy(model, pin=pin))
         self.checkpoint_name = path.name
+        self.checkpoint_file = path
+        self._checkpoint_request = name
         logger.info("checkpoint %s in RAM: %.1fs", path.name, time.time() - t0)
         self.set_matmul(self.matmul)
+        self.set_attention()
+
+    def set_attention(self) -> None:
+        """Sets the attention kernel from the settings on the loaded network. Like the matmul mode, it can be
+        changed between requests: the weights are not touched."""
         s = self.settings
-        set_attention_kernel(model.blocks, s.attention, s.attention_sage2_min_tokens)   # only the main blocks, see transformer.py
+        set_attention_kernel(self.model.blocks, s.attention, s.attention_sage2_min_tokens)   # only the main blocks, see transformer.py
+        self._attention = (s.attention, s.attention_sage2_min_tokens)
         if s.attention == "sage2":
             logger.info("attention: kernel sage2 from %d tokens, cudnn below", s.attention_sage2_min_tokens)
         else:
@@ -256,16 +360,7 @@ class Krea2Engine:
     # ------------------------------------------------------------------ LoRA
     def _inside(self, folder: Path, name: str) -> Path:
         """Path to a file inside folder; does not allow escaping it via '..'."""
-        folder = folder.resolve()
-        path = (folder / name).resolve()
-        if not path.is_file():
-            # the name is given without an extension; we append it rather than replace: names can contain dots ("style_v1.2.1")
-            path = path.with_name(path.name + ".safetensors")
-        if not path.is_relative_to(folder):
-            raise ValueError(f"path {name!r} is outside {folder}")
-        if not path.is_file():
-            raise FileNotFoundError(f"no file {name!r} in {folder}")
-        return path
+        return inside_folder(folder, name)
 
     def _lora(self, name: str) -> LoraFile:
         path = self._inside(self.settings.lora_dir, name)
@@ -306,7 +401,8 @@ class Krea2Engine:
         return [(used if f is edit else f, w) for f, w in lora_files], rank
 
     def list_files(self, kind: str) -> list[str]:
-        folder = (self.settings.models_dir / kind).resolve()
+        """Model files of one kind ("checkpoints" or "loras"), as names relative to that kind's folder."""
+        folder = (self.settings.checkpoint_dir if kind == "checkpoints" else self.settings.lora_dir).resolve()
         patterns = ("*.safetensors", "*.gguf") if kind == "checkpoints" else ("*.safetensors",)
         return sorted(p.relative_to(folder).as_posix() for pat in patterns for p in folder.rglob(pat))
 

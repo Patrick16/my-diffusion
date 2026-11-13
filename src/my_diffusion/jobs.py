@@ -175,6 +175,15 @@ class Scheduler:
         self._paused = False
         self._poke()
 
+    def pause(self) -> None:
+        """No new job starts until resume(); running ones go on (the API pauses when the models are gone)."""
+        self._paused = True
+
+    def set_limits(self, max_pending: int, max_per_user: int) -> None:
+        """New queue limits (the config API). They apply to jobs submitted from now on; jobs already waiting stay."""
+        self._max_pending = max_pending
+        self._max_per_user = max_per_user
+
     @property
     def paused(self) -> bool:
         return self._paused
