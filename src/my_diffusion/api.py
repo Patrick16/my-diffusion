@@ -1,7 +1,7 @@
 """HTTP layer on top of the engine. No ML logic here: check who is calling, validate the request, hand it to the
 scheduler, and turn errors into understandable HTTP codes.
 
-    uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000
+    uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5
 
 Run exactly ONE server process (no `--workers N`): every process loads its own copy of the models.
 Interactive documentation of all endpoints: http://127.0.0.1:8000/docs
@@ -9,6 +9,7 @@ Interactive documentation of all endpoints: http://127.0.0.1:8000/docs
 The flow:
     POST /generate            -> 202 with the job id; the job waits in the queue
     GET  /result/{id}         -> status, position in the queue, progress, result or error
+    GET  /result/{id}/events  -> the same as /result/{id}, but pushed as server-sent events (no polling)
     GET  /result/{id}/image   -> the PNG, once the status is "done"
     POST /cancel/{id}         -> cancel: a waiting job at once, a running one at its next step
     GET  /jobs                -> your jobs (an admin sees everybody's)
@@ -31,7 +32,7 @@ from importlib.metadata import version as package_version
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -553,6 +554,59 @@ async def result(job_id: str, caller: CallerDep) -> JobInfo:
     """The job's status: queued (with its position), running (with progress), done (with image_url), failed
     (with error) or cancelled."""
     return _job_info(_visible_job(job_id, caller))
+
+
+EVENT_KEEPALIVE_SECONDS = 15.0   # a comment line this often keeps proxies and idle-timeouts from closing the stream
+
+
+def _sse(event: str, data: str) -> str:
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+@app.get(
+    "/result/{job_id}/events",
+    response_class=StreamingResponse,
+    tags=["jobs"],
+    responses={200: {"content": {"text/event-stream": {}}, "description": "Server-sent events"}, **_errors(401, 404)},
+)
+async def result_events(job_id: str, caller: CallerDep) -> StreamingResponse:
+    """Server-sent events instead of polling GET /result/{id}.
+
+    The first event is the job as it is now; after that, a new event whenever something changes: the job's
+    position in the queue, its progress step, `cancel_requested`, or its end. Every event's data is the same JSON as
+    GET /result/{id}. Events named `update` leave the stream open; the last one is named after the final status
+    (`done`, `failed` or `cancelled`) and the server then closes the stream. A `: keepalive` comment line is sent
+    every 15 s of silence.
+
+    Send the key like for every other call (`Authorization: Bearer ...`). The browser's `EventSource` cannot set
+    headers: use `fetch` and read the response body as a stream. A client that reconnects simply gets the current
+    state first."""
+    _visible_job(job_id, caller)
+    s = _scheduler()
+
+    async def stream():
+        wake = s.subscribe()
+        last = None
+        try:
+            while True:
+                wake.clear()   # before looking: a change that lands while we look wakes us again
+                job = s.get(job_id)
+                info = _job_info(job)
+                data = info.model_dump_json()
+                if data != last:
+                    last = data
+                    yield _sse(job.status if job.finished else "update", data)
+                if job.finished or s.stopping:
+                    return
+                try:
+                    await asyncio.wait_for(wake.wait(), EVENT_KEEPALIVE_SECONDS)
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            s.unsubscribe(wake)
+
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}   # no buffering in nginx-like proxies
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.get(

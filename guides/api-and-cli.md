@@ -5,7 +5,7 @@ The same engine is reachable two ways: an HTTP server and a CLI. Both accept the
 ## HTTP server
 
 ```bash
-uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000
+uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5
 ```
 
 The server documents itself. The same OpenAPI schema is shown three ways; pick the one you like:
@@ -28,6 +28,7 @@ four addresses.
 | `GET /health` | `loading` / `ok` / `error`, the current checkpoint |
 | `POST /generate` | queue a generation; answers at once (`202`) with the job id |
 | `GET /result/{job_id}` | the job: status, position in the queue, progress, result or error |
+| `GET /result/{job_id}/events` | the same job pushed as server-sent events, instead of polling ([details](job-queue.md#events-instead-of-polling)) |
 | `GET /result/{job_id}/image` | the finished PNG |
 | `POST /cancel/{job_id}` | cancel a waiting or running job |
 | `GET /jobs` | your jobs (an admin sees everybody's) |

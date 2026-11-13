@@ -76,9 +76,12 @@ class _Running:
     cancel_event: threading.Event = field(default_factory=threading.Event)
     progress: tuple[int, int] | None = None
     task: asyncio.Task | None = None
+    notify: Callable[[], None] | None = None   # wakes the event subscribers; safe to call from any thread
 
     def report(self, done: int, total: int) -> None:   # called from the slot's thread
         self.progress = (done, total)
+        if self.notify is not None:
+            self.notify()
 
 
 def fair_order(queued: list[JobRecord], last_served: dict[str, float]) -> list[JobRecord]:
@@ -123,6 +126,36 @@ class Scheduler:
         self._paused = True
         self._wake: asyncio.Event | None = None
         self._dispatcher: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._subscribers: set[asyncio.Event] = set()   # one per open event stream (see subscribe)
+        self._stopping = False
+
+    # ------------------------------------------------------------------ change notifications
+    # Event streams (GET /result/{id}/events) do not receive the changes themselves; they are only woken up and then
+    # look at the job again. A wake-up that arrives while a stream is busy is therefore never lost (the Event stays
+    # set), and many quick progress reports simply merge into one update.
+    def subscribe(self) -> asyncio.Event:
+        """A new wake-up flag, set on every change of any job (a state change, a progress step, a queue move)."""
+        wake = asyncio.Event()
+        self._subscribers.add(wake)
+        return wake
+
+    def unsubscribe(self, wake: asyncio.Event) -> None:
+        self._subscribers.discard(wake)
+
+    @property
+    def stopping(self) -> bool:
+        """True once stop() has begun: event streams should end."""
+        return self._stopping
+
+    def _notify(self) -> None:   # on the event loop thread
+        for wake in list(self._subscribers):
+            wake.set()
+
+    def _notify_threadsafe(self) -> None:   # from a slot's thread
+        if self._loop is not None:
+            with contextlib.suppress(RuntimeError):   # the loop is already closed: nobody is listening
+                self._loop.call_soon_threadsafe(self._notify)
 
     # ------------------------------------------------------------------ lifecycle
     def start(self, paused: bool = False) -> None:
@@ -132,6 +165,8 @@ class Scheduler:
             logger.warning("job %s was running when the server stopped unexpectedly; marked failed", job_id)
             self._finished(job_id)
         self._paused = paused
+        self._stopping = False
+        self._loop = asyncio.get_running_loop()
         self._wake = asyncio.Event()
         self._dispatcher = asyncio.create_task(self._dispatch(), name="job-scheduler")
         self._dispatcher.add_done_callback(self._on_dispatcher_exit)
@@ -148,6 +183,8 @@ class Scheduler:
         """Clean shutdown: running jobs are asked to stop and go back to the queue (a job the user already
         cancelled ends as cancelled instead). Waiting jobs stay queued for the next start."""
         self._paused = True
+        self._stopping = True
+        self._notify()   # open event streams end instead of holding the shutdown
         for run in list(self._running.values()):
             run.cancel_event.set()
             if not self.store.requeue(run.job.id):
@@ -203,6 +240,7 @@ class Scheduler:
         elif job_id in self._running:
             self.store.request_cancel(job_id)
             self._running[job_id].cancel_event.set()
+        self._notify()   # cancel_requested changed, or a waiting job ended
         return self.get(job_id)
 
     def progress(self, job_id: str) -> tuple[int, int] | None:
@@ -225,6 +263,7 @@ class Scheduler:
 
     # ------------------------------------------------------------------ dispatching
     def _poke(self) -> None:
+        self._notify()   # a job was added or ended: positions in the queue may have moved
         if self._wake is not None:
             self._wake.set()
 
@@ -248,10 +287,11 @@ class Scheduler:
                     break
 
     def _launch(self, slot: Slot, job: JobRecord) -> None:
-        run = _Running(job=job, slot=slot)
+        run = _Running(job=job, slot=slot, notify=self._notify_threadsafe)
         self._running[job.id] = run
         self._busy[slot.name] = job.id
         self._last_served[job.owner] = time.monotonic()
+        self._notify()   # the job is running now, and the jobs behind it moved up
         run.task = asyncio.create_task(self._run(run), name=f"job-{job.id}")
 
     async def _run(self, run: _Running) -> None:

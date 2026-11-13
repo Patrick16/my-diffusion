@@ -10,6 +10,7 @@ cancelled while it waits or while it runs. Jobs are stored in SQLite, so the que
 |---|---|---|
 | Submit | `POST /generate` (same body as before) | `202` with the job: `job_id`, `status`, `position` |
 | Poll | `GET /result/{job_id}` | the job: status, position, progress (`step` / `total_steps`), `result`, `image_url`, `error` |
+| Watch | `GET /result/{job_id}/events` | the same job, pushed as server-sent events (see below) |
 | Fetch | `GET /result/{job_id}/image` | the PNG, once the status is `done` (`409` before) |
 | Cancel | `POST /cancel/{job_id}` | the job; `409` if it has already finished |
 | List | `GET /jobs?limit=50` | your jobs, newest first; admins see everybody's (or `?owner=telegram:123`) |
@@ -17,6 +18,35 @@ cancelled while it waits or while it runs. Jobs are stored in SQLite, so the que
 A request that is malformed (bad base64, `mask` without `init_image` ...) gets `400` at once and is not queued.
 Problems only the engine can see (an unknown LoRA, a size that does not fit the GPU) make the job `failed`, with
 the reason in `error`. A full queue answers `429`.
+
+## Events instead of polling
+
+`GET /result/{job_id}/events` keeps the connection open and pushes the job whenever something changes: its
+position in the queue, a sampler step, `cancel_requested`, the end. Polling `GET /result/{id}` still works, and
+a simple client may keep using it.
+
+```
+event: update
+data: {"job_id": "...", "status": "running", "step": 3, "total_steps": 8, ...}
+
+event: done
+data: {"job_id": "...", "status": "done", "image_url": "/result/.../image", ...}
+```
+
+- The first event is the job as it is now, so a client that connects late (or reconnects) loses nothing.
+- The data of every event is the same JSON as `GET /result/{id}`. Events named `update` leave the stream open;
+  the last is named after the final status (`done`, `failed`, `cancelled`) and the server then closes it.
+- Quick changes merge: a client sees the latest state, not every single step.
+- A `: keepalive` comment line comes after every 15 s of silence.
+- The same access rules apply as for the status (someone else's job is `404`).
+- The browser's `EventSource` cannot send an `Authorization` header. A web client reads the stream with `fetch`
+  (`response.body.getReader()`); a program uses any streaming HTTP client (for example `httpx.stream`).
+- An open stream holds the server's shutdown until it ends (uvicorn waits for connections). Start the server with
+  `--timeout-graceful-shutdown 5` (as in the commands in this guide set) so Ctrl+C closes streams after 5 s.
+
+```bash
+curl -N -H "Authorization: Bearer <key>" http://127.0.0.1:8000/result/<job id>/events
+```
 
 ## Job statuses
 
@@ -131,7 +161,9 @@ Without keys configured, leave out `$headers`.
 ## Not covered yet
 
 - No automatic clean-up of old jobs and pictures.
-- No push notification when a job ends: clients poll `GET /result/{id}` (every 1-2 s is plenty).
 - `/enhance-prompt` is not queued: it runs on the first GPU's thread between jobs.
+- No endpoint for a job's input pictures (init image, mask, references): they are deleted when the job ends. Planned: keep them and add something like `GET /result/{id}/inputs/{name}`, so clients can show and reuse them (needed by the web UI's request card).
+- No endpoint to read or change the server's configuration at run time (matmul and attention modes, devices, queue limits ...); `/health` only shows a few of them. Planned: an admin-only config endpoint saying which settings apply at once, which reload the models and which need a restart (needed by the web UI's Settings page). It should also let an admin set the checkpoints and LoRA folders (separate settings instead of one `models_dir`, with the paths checked and a server-side folder listing for the UI). The output folder stays read-only: pictures are found by name in it, so changing it would hide old ones.
+- Size limits of reference editing and outpainting: one reference goes up to the 720 tier, two only at 480, and 1080 is not supported, because the network, the edit LoRA and the reference tokens must fit into 16 GB of VRAM together (`EDIT_MAX_TIER` in `engine.py`). Planned: stop refusing these sizes and only warn that they are slower (the web UI already shows such a warning), and look for ways to optimize editing so that large sizes and two references run fast without limits (memory use of the LoRA and reference tokens, offloading, attention).
 - The scheduler lives inside the API process. Separate worker machines would need a shared database (Postgres)
   instead of the SQLite file.

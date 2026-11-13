@@ -55,7 +55,7 @@ uv run my-diffusion-generate "a fox in the snow, golden hour" --resolution 720 -
 Start the HTTP server (interactive documentation at http://127.0.0.1:8000/docs or http://127.0.0.1:8000/scalar):
 
 ```bash
-uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000
+uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 5
 ```
 
 Optional settings go into a `.env` file: copy `.env.example` to `.env` and edit it.
