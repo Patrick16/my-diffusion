@@ -104,6 +104,11 @@ The only exception: if the user explicitly asks for specific words to be written
 Write under 120 words. Output only the description: no preamble, no explanations, no lists."""
 
 
+# keep_original: latent cells (8 px each) along the inner edges of reference 1's box where the generated
+# margin and the kept picture are mixed (imaging.outpaint_keep_weight). Chosen by looking at GPU results.
+KEEP_BLEND = 2
+
+
 def normalize_outpaint(outpaint, references: list, reference_mode: str) -> imaging.Margins | None:
     """Validate the outpaint request and return its margins, or None when outpainting is off.
 
@@ -322,6 +327,7 @@ class Krea2Engine:
         reference_mode: str = "scene",
         outpaint: tuple[float, float, float, float] | None = None,
         remove_background: str = "none",
+        keep_original: bool = False,
     ) -> dict:
         """guidance_interval - the part of the run (as fractions of the steps) where CFG is applied;
         only matters when guidance_scale != 1. See sampler.sample.
@@ -359,7 +365,12 @@ class Krea2Engine:
         of an edit). Only in "scene" mode; all zeros = off. The result frame is reference 1 grown by those
         margins at the pixel budget of `resolution` (imaging.outpaint_frame; it replaces aspect_ratio). Reference
         1 is not cropped: it is resized to its place in the frame and given to the network at that token
-        offset, and the rest of the frame is generated around it.
+        offset, and the rest of the frame is generated around it. The model still redraws reference 1's
+        area a little (it is generated too, only guided by the reference tokens).
+        keep_original - only with outpaint: keep reference 1's pixels as they are. Its area is held to the
+        original picture after every step, exactly like the kept part of an inpaint (latent blend), and only
+        the margins are generated; a band of KEEP_BLEND latent cells at the inner edges of the box is mixed
+        (imaging.outpaint_keep_weight), so the seam stays hidden but those cells may change. Off by default.
         remove_background - "subjects": cut the background (u2net, on the CPU) out of the people / objects before
         they are used: references 2.. in "scene" mode, all references in "subjects" mode; "none" - leave as is.
         Not combinable with init_image or mask."""
@@ -369,13 +380,13 @@ class Krea2Engine:
             return self._generate(
                 prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
                 tuple(guidance_interval), init_image, strength, mask, feather, list(references or []), reference_mode,
-                outpaint, remove_background,
+                outpaint, remove_background, keep_original,
             )
 
     def _generate(
         self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval,
         init_image=None, strength=None, mask=None, feather=2, references=None, reference_mode="scene",
-        outpaint=None, remove_background="none",
+        outpaint=None, remove_background="none", keep_original=False,
     ) -> dict:
         s = self.settings
         if reference_mode not in REFERENCE_MODES:
@@ -384,6 +395,8 @@ class Krea2Engine:
             raise ValueError(f"remove_background must be one of {list(REMOVE_BACKGROUND_MODES)}, got {remove_background!r}")
         references = list(references or [])
         margins = normalize_outpaint(outpaint, references, reference_mode)
+        if keep_original and margins is None:
+            raise ValueError("keep_original keeps reference 1 inside an outpainted frame, so it needs outpaint (non-zero margins)")
         if len(references) > s.max_references:
             raise ValueError(f"at most {s.max_references} reference pictures are supported, got {len(references)}")
         if references and (init_image is not None or mask is not None):
@@ -436,6 +449,9 @@ class Krea2Engine:
             # shrunk to the latent grid (1 = regenerate, 0 = keep). Cheap and on the CPU: done here, so
             # a bad mask or feather surfaces before the heavy work.
             weight = imaging.mask_to_latent(cover_crop(mask, width, height), height // VAE_SCALE, width // VAE_SCALE, feather)
+        elif keep_original:
+            # Outpaint with the original kept: 1 = generate (the margins), 0 = keep (reference 1's box).
+            weight = imaging.outpaint_keep_weight(width, height, src_box, KEEP_BLEND)
         # Editing: the reference frames, prepared on the CPU now (cheap). In "scene" mode reference 1 gets
         # the output frame itself; the others (all of them in "subjects" mode) keep their proportions and sit centred in the frame, at an
         # offset in tokens. Every side is a multiple of 16, so each latent cuts into whole 2x2 patches.
@@ -464,6 +480,8 @@ class Krea2Engine:
             frames.append(frame)
             offsets.append(offset)
             logger.debug("reference %d: %dx%d -> frame %dx%d at token offset %s", k + 1, *ref.size, *frame.size, offset)
+        # keep_original: the picture the kept area is held to - reference 1 at its box in a full-frame canvas.
+        keep_canvas = imaging.place_in_frame(frames[0], width, height, src_box) if keep_original else None
         # The vision tower sees the same frames as the VAE, shrunk to its size cap.
         vision_frames = [imaging.cap_longest_side(frame, s.vision_max_side) for frame in frames]
         lora_files = [(self._lora(name), weight) for name, weight in loras]   # read in advance: a name error surfaces before the heavy work
@@ -504,6 +522,10 @@ class Krea2Engine:
             t0 = time.time()
             self.gpu.use("vae")
             refs = [(self.vae.encode(frame), offset) for frame, offset in zip(frames, offsets)]
+            if keep_canvas is not None:
+                # The kept area's target. Not the reference latent itself: that one has the box's size and
+                # sits at a token offset, while the blend works on the full output grid.
+                latent0 = self.vae.encode(keep_canvas)
             timings["encode_references"] = time.time() - t0
 
         # 2. noise -> latent
@@ -535,9 +557,14 @@ class Krea2Engine:
         noise_seed = seed ^ EDIT_NOISE_SALT if references else seed
         noise = sampler.make_noise(noise_seed, LATENT_CHANNELS, lat_h, lat_w).to(s.device)
         post_step = None
-        if latent0 is None:
+        if init_image is None:
+            # text-to-image, an edit, or outpaint with keep_original: the full schedule from pure noise.
+            # (With keep_original, latent0 is only the target of the blend below; at sigma = 1 the kept area
+            # IS the noise, so the start needs no blend.)
             sigmas = sampler.make_sigmas(steps, mu)
             start = noise
+            if latent0 is not None:
+                latent0 = latent0.to(noise)
         else:
             latent0 = latent0.to(noise)
             sigmas = sampler.make_sigmas(steps, mu, skip=steps - image_steps)
@@ -549,7 +576,7 @@ class Krea2Engine:
             weight = weight.to(noise)   # float32 on the device of x; broadcasts over the 16 channels
 
             def post_step(x: torch.Tensor, sigma_next: float) -> torch.Tensor:
-                # Inpaint blend (latent blend, as in RePaint): after each step the kept area is replaced
+                # Inpaint / keep_original blend (latent blend, as in RePaint): after each step the kept area is replaced
                 # by the original picture noised to the level the new x is at. Both latents are in the
                 # same normalized space (vae.encode returns it), so mixing them is meaningful.
                 # The noise MUST be the same tensor that built `start`. Then the kept area moves along the
@@ -602,6 +629,7 @@ class Krea2Engine:
             "reference_mode": reference_mode if references else None,
             "outpaint": None if margins is None else dict(margins._asdict()),
             "remove_background": remove_background if cut_background else "none",
+            "keep_original": bool(keep_original),
             "edit_lora_rank": edit_rank,   # None without editing or with the edit LoRA switched off
             "timings": {k: round(v, 2) for k, v in timings.items()},
         }

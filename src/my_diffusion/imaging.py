@@ -12,6 +12,7 @@ import io
 import math
 from typing import NamedTuple
 
+import numpy as np
 import torch
 from PIL import Image, UnidentifiedImageError
 
@@ -86,6 +87,62 @@ def outpaint_frame(
         frame_h * top / (100 + top + bottom), frame_h, frame_h * 100 / (100 + top + bottom), PATCH_PIXELS
     )
     return frame_w, frame_h, (box_left, box_top, box_w, box_h)
+
+
+LATENT_PIXELS = 8   # one latent cell = 8x8 image pixels (the VAE's scale)
+
+
+def outpaint_keep_weight(
+    frame_w: int, frame_h: int, src_box: tuple[int, int, int, int], blend: int = 2
+) -> torch.Tensor:
+    """Latent blend weight for outpainting with the original kept: (1, 1, frame_h // 8, frame_w // 8),
+    float32, 1 = generate, 0 = keep (the same convention as mask_to_latent).
+
+    Outside src_box the weight is 1. Inside it the weight is 0, except a band of `blend` latent cells
+    along each INNER edge of the box (an edge that does not lie on the frame's border): there it falls
+    linearly from blend / (blend + 1) at the edge to 0, so the generated margin and the kept picture are
+    mixed over a few cells and the seam stays hidden. The kept area is therefore the box shrunk by `blend`
+    cells at its inner edges (Wan2GP shrinks its outpainting mask the same way) and is exactly 0 there.
+    Edges on the frame's border get no band: nothing is generated beyond them. blend = 0 is a hard edge."""
+    if frame_w <= 0 or frame_h <= 0 or frame_w % LATENT_PIXELS or frame_h % LATENT_PIXELS:
+        raise ValueError(f"frame size must be positive multiples of {LATENT_PIXELS}, got {frame_w}x{frame_h}")
+    if blend < 0:
+        raise ValueError(f"blend must be >= 0, got {blend}")
+    left, top, box_w, box_h = src_box
+    if left % LATENT_PIXELS or top % LATENT_PIXELS or box_w % LATENT_PIXELS or box_h % LATENT_PIXELS:
+        raise ValueError(f"src_box must be on the latent grid ({LATENT_PIXELS} px), got {src_box}")
+    if box_w <= 0 or box_h <= 0 or left < 0 or top < 0 or left + box_w > frame_w or top + box_h > frame_h:
+        raise ValueError(f"src_box {src_box} does not fit the {frame_w}x{frame_h} frame")
+    lat_w, lat_h = frame_w // LATENT_PIXELS, frame_h // LATENT_PIXELS
+    x0, y0 = left // LATENT_PIXELS, top // LATENT_PIXELS
+    x1, y1 = x0 + box_w // LATENT_PIXELS, y0 + box_h // LATENT_PIXELS   # exclusive
+
+    def axis(n: int, a: int, b: int) -> torch.Tensor:
+        """Per-cell weight along one axis: 1 outside [a, b), the ramp near inner edges, 0 deeper inside."""
+        i = torch.arange(n, dtype=torch.float32)
+        inf = torch.full((n,), float("inf"))
+        d_low = i - a if a > 0 else inf          # distance from the low edge, only if it is an inner edge
+        d_high = (b - 1) - i if b < n else inf   # distance from the high edge
+        d = torch.minimum(d_low, d_high)
+        w = ((blend - d) / (blend + 1)).clamp(0.0, 1.0) if blend > 0 else torch.zeros(n)
+        return torch.where((i < a) | (i >= b), torch.ones(n), w)
+
+    wx, wy = axis(lat_w, x0, x1), axis(lat_h, y0, y1)
+    return torch.maximum(wy.view(-1, 1), wx.view(1, -1)).view(1, 1, lat_h, lat_w)
+
+
+def place_in_frame(picture: Image.Image, frame_w: int, frame_h: int, src_box: tuple[int, int, int, int]) -> Image.Image:
+    """The picture (already resized to the box) in a frame_w x frame_h canvas at src_box; the rest of the
+    canvas repeats the picture's edge pixels. The margins are thrown away by the blend anyway; edge
+    repetition (not a flat colour) keeps the VAE from smearing an unrelated colour into the box's border cells."""
+    left, top, box_w, box_h = src_box
+    if picture.size != (box_w, box_h):
+        raise ValueError(f"the picture must already be {box_w}x{box_h}, got {picture.width}x{picture.height}")
+    pixels = np.asarray(picture.convert("RGB"))
+    padded = np.pad(
+        pixels, ((top, frame_h - top - box_h), (left, frame_w - left - box_w), (0, 0)), mode="edge"
+    )
+    return Image.fromarray(padded)
 
 
 def load_rgb(data: bytes) -> Image.Image:
