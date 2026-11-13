@@ -21,11 +21,12 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
+from typing import Callable
 
 import torch
 from PIL import Image
 
-from . import background, imaging, sampler
+from . import background, cancellation, imaging, sampler
 from .config import Settings
 from .imaging import cover_crop
 from .lora import LoraFile, apply_loras, load_lora, truncate_rank
@@ -209,9 +210,14 @@ class Krea2Engine:
         with self._lock:
             return self._enhance(prompt, seed)
 
-    def _enhance(self, prompt: str, seed: int | None) -> str:
+    def _enhance(self, prompt: str, seed: int | None, cancel_event: threading.Event | None = None) -> str:
+        """With cancel_event the enhancer stops writing as soon as the job is cancelled; the cut text is then
+        thrown away by the checkpoint that follows the call in _generate."""
         self.gpu.use("qwen")
-        return self.qwen.chat(ENHANCER_SYSTEM_PROMPT, prompt, max_new_tokens=self.settings.enhancer_max_new_tokens, seed=seed)
+        return self.qwen.chat(
+            ENHANCER_SYSTEM_PROMPT, prompt, max_new_tokens=self.settings.enhancer_max_new_tokens, seed=seed,
+            should_stop=None if cancel_event is None else cancel_event.is_set,
+        )
 
     def _encode(self, prompt: str) -> torch.Tensor:
         cached = self._text_cache.get(prompt)
@@ -323,8 +329,18 @@ class Krea2Engine:
         outpaint: tuple[float, float, float, float] | None = None,
         remove_background: str = "none",
         keep_original: bool = False,
+        cancel_event: threading.Event | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+        output_name: str | None = None,
     ) -> dict:
-        """guidance_interval - the part of the run (as fractions of the steps) where CFG is applied;
+        """cancel_event / on_progress - used by the job queue (see cancellation.py and jobs.py). The event is
+        checked at the safe points of the run and raises GenerationCancelled; on_progress(done, total) is
+        called after every network step. Both are optional: the CLI passes neither.
+
+        output_name - file name of the PNG in output_dir (the scheduler passes "<job id>.png": unique even when
+        several GPUs finish in the same second with the same seed). None - "<unix time>_<seed>.png".
+
+        guidance_interval - the part of the run (as fractions of the steps) where CFG is applied;
         only matters when guidance_scale != 1. See sampler.sample.
 
         init_image / strength - image-to-image. The picture is cropped to the requested size, encoded
@@ -371,17 +387,20 @@ class Krea2Engine:
         Not combinable with init_image or mask."""
         if not self.loaded:
             raise RuntimeError("the engine is not loaded yet")
+        if output_name is not None and (Path(output_name).name != output_name or not output_name.endswith(".png")):
+            raise ValueError(f"output_name must be a plain .png file name, got {output_name!r}")
         with self._lock:
             return self._generate(
                 prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
                 tuple(guidance_interval), init_image, strength, mask, feather, list(references or []), reference_mode,
-                outpaint, remove_background, keep_original,
+                outpaint, remove_background, keep_original, cancel_event, on_progress, output_name,
             )
 
     def _generate(
         self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval,
         init_image=None, strength=None, mask=None, feather=2, references=None, reference_mode="scene",
-        outpaint=None, remove_background="none", keep_original=False,
+        outpaint=None, remove_background="none", keep_original=False, cancel_event=None, on_progress=None,
+        output_name=None,
     ) -> dict:
         s = self.settings
         if reference_mode not in REFERENCE_MODES:
@@ -461,6 +480,7 @@ class Krea2Engine:
         # the output frame itself; the others (all of them in "subjects" mode) keep their proportions and sit centred in the frame, at an
         # offset in tokens. Every side is a multiple of 16, so each latent cuts into whole 2x2 patches.
         cut_seconds = None
+        cancellation.checkpoint(cancel_event)
         if cut_background:
             t0 = time.time()
             references = [
@@ -499,8 +519,9 @@ class Krea2Engine:
 
         # 1. text (with the reference pictures when editing)
         t0 = time.time()
-        enhanced = self._enhance(prompt, seed) if enhance else None
+        enhanced = self._enhance(prompt, seed, cancel_event) if enhance else None
         timings["enhance"] = time.time() - t0
+        cancellation.checkpoint(cancel_event)
         t0 = time.time()
         use_cfg = guidance_scale != 1.0
         if references:
@@ -533,6 +554,7 @@ class Krea2Engine:
             timings["encode_references"] = time.time() - t0
 
         # 2. noise -> latent
+        cancellation.checkpoint(cancel_event)
         t0 = time.time()
         self.gpu.use("model")
         # The same LoRA set with the same weights as in the previous request is already attached and sits
@@ -598,6 +620,7 @@ class Krea2Engine:
             self.model, start, cond.to(s.device), sigmas,
             uncond=None if uncond is None else uncond.to(s.device), guidance_scale=guidance_scale,
             guidance_interval=guidance_interval, post_step=post_step, refs=refs,
+            on_step=on_progress, cancel_event=cancel_event,
         )
         # No extra composite after the loop: the last post_step already puts latent0 back outside the mask
         # (sigma_next = 0). A second blend would apply the feathered weight twice on the soft edge.
@@ -605,12 +628,13 @@ class Krea2Engine:
         peak_vram = torch.cuda.max_memory_allocated() / 2**30
 
         # 3. latent -> pixels
+        cancellation.checkpoint(cancel_event)
         t0 = time.time()
         self.gpu.use("vae")
         image = self.vae.decode(latent)
         timings["decode"] = time.time() - t0
 
-        path = s.output_dir / f"{int(time.time())}_{seed}.png"
+        path = s.output_dir / (output_name or f"{int(time.time())}_{seed}.png")
         image.save(path)
         timings["total"] = time.time() - t_all
         logger.info(

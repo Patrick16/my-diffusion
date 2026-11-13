@@ -22,13 +22,25 @@ when a picture is encoded for the first time (load_vision)."""
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import torch
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+
+def stop_when(should_stop: Callable[[], bool]):
+    """A transformers stopping criterion that ends generate() once should_stop() is True (checked per token).
+    Built on demand: transformers is imported lazily in this module, as everywhere in it."""
+    from transformers import StoppingCriteria, StoppingCriteriaList
+
+    class _StopWhen(StoppingCriteria):
+        def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor, **kwargs) -> torch.Tensor:
+            return torch.full((input_ids.shape[0],), bool(should_stop()), dtype=torch.bool, device=input_ids.device)
+
+    return StoppingCriteriaList([_StopWhen()])
 
 # Which hidden states we take. hidden_states[0] - embeddings, hidden_states[k] - output of layer k.
 TAP_LAYERS = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)
@@ -275,7 +287,13 @@ class QwenVL:
 
     # ------------------------------------------------------------------ role 2: text generation
     @torch.inference_mode()
-    def chat(self, system: str, user: str, max_new_tokens: int = 300, temperature: float = 0.7, seed: int | None = None) -> str:
+    def chat(
+        self, system: str, user: str, max_new_tokens: int = 300, temperature: float = 0.7, seed: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> str:
+        """should_stop - polled after every generated token; when it returns True the generation ends early and
+        the text so far is returned. The job queue uses it to cancel a job while the enhancer is still writing
+        (up to enhancer_max_new_tokens tokens, several seconds); the caller decides what to do with the cut text."""
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
@@ -287,5 +305,6 @@ class QwenVL:
             do_sample=temperature > 0,
             temperature=temperature if temperature > 0 else None,
             top_p=0.9 if temperature > 0 else None,
+            stopping_criteria=None if should_stop is None else stop_when(should_stop),
         )
         return self.tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()

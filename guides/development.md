@@ -6,6 +6,12 @@
 uv run pytest
 ```
 
+The tests need no GPU and no models. For the job system: `test_store.py` (the SQLite store), `test_jobs.py`
+(the scheduler: fairness, limits, several slots, cancelling, restarts; plain Python stands in for a generation),
+`test_auth.py` (keys and owners), `test_api_jobs.py` (the HTTP flow and who sees what, with a stub engine),
+`test_sampler_cancel.py` and `test_enhancer_cancel.py` (where a running generation stops). See
+[jobs, queue and access](job-queue.md).
+
 ## Verification scripts
 
 Every stage of building the engine is verified separately - handy if something breaks after updating
@@ -32,6 +38,5 @@ the libraries or on another machine. Scripts that need the GPU and the models ar
 
 - references combined with `init_image` / `mask`
 - LoKr/LoHa LoRA files
-- request queue: generations run strictly one at a time
 - other Qwen models for the prompt enhancer (Qwen3.5-4B-Abliterated, qwen3_8b): links to them in
   `models/text_encoders` are created, but the loader currently supports only Qwen3-VL-4B

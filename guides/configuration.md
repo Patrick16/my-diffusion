@@ -33,6 +33,21 @@ defaults from `src/my_diffusion/config.py` are used.
 
 Details and measurements: [performance](performance.md).
 
+## Jobs and access
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MY_DIFFUSION_DEVICES` | unset | GPUs that run jobs: unset = `MY_DIFFUSION_DEVICE` only; `auto` = every CUDA device; or a list `["cuda:0","cuda:1"]`. Each GPU holds its own copy of the models (~19 GB RAM) |
+| `MY_DIFFUSION_DATABASE_PATH` | `./data/jobs.sqlite3` | the job database (SQLite) |
+| `MY_DIFFUSION_INPUTS_DIR` | `./data/inputs` | pictures sent with waiting jobs; deleted when a job ends |
+| `MY_DIFFUSION_QUEUE_MAX_PENDING` | `16` | jobs waiting at once, all users together; beyond that `429` |
+| `MY_DIFFUSION_QUEUE_MAX_PER_USER` | `3` | jobs waiting or running per user; admins are exempt |
+| `MY_DIFFUSION_API_KEYS` | empty | JSON `{"client": "key"}`, keys of 16+ characters. Empty = access control off, everyone is an admin |
+| `MY_DIFFUSION_ADMIN_CLIENTS` | empty | JSON list of the clients whose key gives admin rights |
+| `MY_DIFFUSION_API_DOCS` | `true` | serve the API documentation (`/docs`, `/scalar`, `/redoc`, `/openapi.json`); `false` removes it |
+
+Details: [jobs, queue and access](job-queue.md).
+
 ## Reference editing and background removal
 
 | Variable | Default | Meaning |

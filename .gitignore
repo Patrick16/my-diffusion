@@ -12,5 +12,8 @@ models_converted/
 outputs/*
 !outputs/.gitkeep
 
+# job database and the pictures of waiting jobs (store.py)
+data/
+
 # Local documentation (Russian working notes): kept on this machine only, not tracked
 /docs/

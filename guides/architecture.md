@@ -19,6 +19,10 @@ Every module starts with an explanation of what it does and why.
 | `engine.py` | Combines everything into `generate()`. Text cache, LoRA cache, timing measurements. |
 | `background.py` | Background removal (u2net on onnxruntime, CPU). |
 | `resolutions.py` | Resolution + aspect ratio -> width and height. |
+| `jobs.py` | The scheduler: one slot per GPU, fair round-robin between users, limits, cancel while waiting or running, restarts. See [jobs, queue and access](job-queue.md). |
+| `store.py` | Job storage in SQLite (conditional updates, so a job is never taken twice) and the folder of input pictures. |
+| `auth.py` | API keys per client; the owner of a job is `<client>:<user>`. |
+| `cancellation.py` | The cooperative cancel flag: `checkpoint()` is called by the sampler before each step and by the engine between stages. |
 | `api.py`, `schemas.py`, `cli.py` | HTTP and the command line on top of the engine. |
 | `config.py` | Settings from `MY_DIFFUSION_*` variables and `.env`. |
 
