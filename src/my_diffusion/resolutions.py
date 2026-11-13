@@ -59,6 +59,12 @@ def _pixel_budget(tier: str) -> int:
     return round(height_16_9 * width_16_9)
 
 
+def max_pixels(tier: str) -> int:
+    """The largest frame (in pixels) of a tier over all preset aspect ratios: rounding the sides to
+    multiples of 16 makes some formats slightly larger than the tier's 16:9 frame."""
+    return max(w * h for w, h in (resolve_dimensions(tier, ratio) for ratio in ASPECT_RATIOS))
+
+
 def resolve_dimensions(tier: str, aspect_ratio: str) -> Dimensions:
     """tier ('480'|'720'|'1080') + aspect_ratio ('16:9', ...) -> (width, height).
 
@@ -75,6 +81,44 @@ def resolve_dimensions(tier: str, aspect_ratio: str) -> Dimensions:
     raw_width = raw_height * ratio
 
     return Dimensions(width=_round_to_block(raw_width), height=_round_to_block(raw_height))
+
+
+def resolve_dimensions_from_size(tier: str, width: float, height: float) -> Dimensions:
+    """tier + the size of a given picture -> (width, height) with the tier's pixel budget and the
+    picture's own aspect ratio (Wan2GP's calculate_new_dimensions with fit_canvas=0).
+
+    Why: snapping to the nearest preset (see nearest_aspect_ratio) distorts or crops a picture
+    whose proportions are not in the list. Here the aspect is kept as exactly as the 16-pixel
+    grid allows, while the GPU cost stays the same as for any other frame of this tier."""
+    if tier not in RESOLUTION_TIERS:
+        raise ValueError(f"Unknown resolution tier: {tier!r}. Available: {list(RESOLUTION_TIERS)}")
+    if not (width > 0 and height > 0 and math.isfinite(width) and math.isfinite(height)):
+        raise ValueError(f"picture size must be positive, got {width}x{height}")
+    scale = math.sqrt(_pixel_budget(tier) / (width * height))
+    raw_w, raw_h = width * scale, height * scale
+    w, h = _round_to_block(raw_w), _round_to_block(raw_h)
+    # Rounding both sides to the nearest 16 can push the area a few percent over the tier's largest
+    # preset frame, which the edit-size check in the engine would then reject. Step the side whose
+    # rounding hurt the aspect ratio least down by one block until the frame fits.
+    limit = max_pixels(tier)
+    while w * h > limit:
+        options = [(w - BLOCK_SIZE, h), (w, h - BLOCK_SIZE)]
+        options = [(a, b) for a, b in options if a >= BLOCK_SIZE and b >= BLOCK_SIZE]
+        if not options:
+            break
+        w, h = min(options, key=lambda ab: abs(math.log(ab[0] / ab[1]) - math.log(raw_w / raw_h)))
+    return Dimensions(width=w, height=h)
+
+
+def nearest_aspect_ratio(width: int, height: int) -> str:
+    """The ASPECT_RATIOS entry closest to width/height (used by aspect_ratio="auto" in editing).
+
+    Closeness is measured on the logarithm of the ratio, so 2:1 and 1:2 are equally far from 1:1:
+    a plain difference of ratios would treat wide and tall pictures unequally."""
+    if width <= 0 or height <= 0:
+        raise ValueError(f"picture size must be positive, got {width}x{height}")
+    target = math.log(width / height)
+    return min(ASPECT_RATIOS, key=lambda name: abs(math.log(ASPECT_RATIOS[name]) - target))
 
 
 def all_combinations() -> dict[str, dict[str, Dimensions]]:

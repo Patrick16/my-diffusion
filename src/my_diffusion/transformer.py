@@ -28,7 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from .weights import QLinear, shared_input
+from .weights import QLinear, shared_input, streamed_adapters
 
 # Which kernel computes attention.
 #
@@ -211,13 +211,15 @@ class TextFusion(nn.Module):
         # 1) for each token separately: attention ALONG the 12 layers (not along the text)
         x = x.reshape(b * seq, nlayers, d)
         for block in self.layerwise_blocks:
-            x = block(x)
+            with streamed_adapters(block, x.device):   # LoRA streaming, see Krea2Transformer.streamed_blocks
+                x = block(x)
         # 2) weighted sum of the 12 layers -> one vector per token
         x = x.view(b, seq, nlayers, d).transpose(2, 3)   # (b, seq, d, 12)
         x = self.projector(x).squeeze(-1)                # (b, seq, d)
         # 3) regular attention along the text
         for block in self.refiner_blocks:
-            x = block(x)
+            with streamed_adapters(block, x.device):
+                x = block(x)
         return x
 
 
@@ -295,6 +297,17 @@ class Krea2Transformer(nn.Module):
         self.txtmlp = nn.Sequential(RMSNorm(cfg.txtdim), QLinear(cfg.txtdim, cfg.features), nn.GELU(approximate="tanh"), QLinear(cfg.features, cfg.features))
         self.last = LastLayer(cfg)
         self.tproj = nn.Sequential(nn.GELU(approximate="tanh"), QLinear(cfg.features, cfg.features * 6))
+        for block in self.streamed_blocks():
+            for m in block.modules():
+                if isinstance(m, QLinear):
+                    m.streamable = True
+
+    def streamed_blocks(self) -> list[nn.Module]:
+        """The blocks that move their own LoRA pairs to the GPU and back (weights.streamed_adapters): the 28
+        main blocks and the 4 text-fusion blocks. Together they hold all but 8 of the 264 layers and almost
+        all LoRA weight. The few layers outside them (first, tmlp, txtmlp, projector, last, tproj) are tiny
+        and keep their pairs on the GPU, as without streaming (lora.apply_loras)."""
+        return [*self.blocks, *self.txtfusion.layerwise_blocks, *self.txtfusion.refiner_blocks]
 
     @property
     def dtype(self) -> torch.dtype:
@@ -308,9 +321,28 @@ class Krea2Transformer(nn.Module):
         nor on the latent. The sampler computes it once for the whole generation, not anew at each step."""
         return self.txtmlp(self.txtfusion(context.to(self.dtype)))
 
-    def forward(self, latent: torch.Tensor, sigma: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, latent: torch.Tensor, sigma: torch.Tensor, text: torch.Tensor,
+        refs: list[tuple[torch.Tensor, tuple[int, int]]] | None = None,
+    ) -> torch.Tensor:
         """latent: (B, 16, h, w) - noisy latent;  sigma: (B,) - noise level 0..1;
-        text: (B, tokens, features) - the text after embed_text.  Returns the velocity (B, 16, h, w)."""
+        text: (B, tokens, features) - the text after embed_text.  Returns the velocity (B, 16, h, w).
+
+        refs - reference pictures for editing: a list of (clean latent, (off_h, off_w)) pairs. The latent
+        is (1, 16, h_k, w_k) in the same normalized space as `latent` (what vae.encode returns), with even
+        sides; the offset says where its token grid sits inside the generated picture's grid, in tokens.
+        The network already reads text and picture as one sequence, so a reference is simply more tokens
+        in it: each one is cut into 2x2 patch tokens exactly like the latent and appended after the
+        picture's tokens, and in every block the picture looks at it through the ordinary attention.
+        The RoPE positions tell the pictures apart: axis 0 is the image index (0 = the picture being
+        generated, k = the k-th reference), axes 1-2 are the row and column in the reference's own grid
+        plus its offset. This is the layout the edit LoRA was trained with (Wan2GP, ComfyUI).
+
+        The references are clean (not noised) but share the picture's noise-level modulation (one tvec
+        for the whole sequence), as in Wan2GP, where editing works this way; ComfyUI's alternative of
+        modulating them as if at noise level 0 is not used by default for Krea 2. Their outputs are
+        dropped: only the generated picture's tokens are returned. Cost: every reference adds its tokens
+        to the attention of all 28 blocks. refs=None (or empty) runs exactly the code without references."""
         cfg = self.cfg
         p = cfg.patch
         b, c, h, w = latent.shape
@@ -331,12 +363,44 @@ class Krea2Transformer(nn.Module):
         grid = pos[:, ntxt:].view(b, gh, gw, 3)
         grid[..., 1] = torch.arange(gh, device=latent.device, dtype=torch.float32)[:, None]
         grid[..., 2] = torch.arange(gw, device=latent.device, dtype=torch.float32)[None, :]
+        if refs:   # reference tokens and their positions go after the picture's
+            img, pos = self._append_refs(img, pos, refs)
         rope = build_rope(pos, self.rope_axes, cfg.theta)
 
         x = torch.cat((txt, img), dim=1)
         for block in self.blocks:
-            x = block(x, tvec, rope)
+            with streamed_adapters(block, x.device):   # LoRA streaming: this block's pairs only, see streamed_blocks
+                x = block(x, tvec, rope)
 
+        if refs:   # drop the reference tokens; only the generated picture is the output
+            x = x[:, : ntxt + gh * gw]
         out = self.last(x, t)[:, ntxt:]                                                   # image tokens only
         out = out.view(b, gh, gw, c, p, p).permute(0, 3, 1, 4, 2, 5).reshape(b, c, h, w)
         return out
+
+    def _append_refs(
+        self, img: torch.Tensor, pos: torch.Tensor, refs: list[tuple[torch.Tensor, tuple[int, int]]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Appends the reference tokens after the picture's (see forward).
+
+        img: (B, N, features) - the picture's tokens after `first`; pos: (B, ntxt + N, 3) - the
+        positions built so far (text, then picture). Each reference goes through the same patch cut
+        and the same `first` layer as the noisy latent, and the k-th one (counting from 1) gets
+        positions (k, off_h + row, off_w + column). Returns the longer img and pos."""
+        p = self.cfg.patch
+        b = img.shape[0]
+        tokens, positions = [img], [pos]
+        for k, (ref, (off_h, off_w)) in enumerate(refs, start=1):
+            ref = ref.to(img.device).expand(b, -1, -1, -1)
+            _, c, rh, rw = ref.shape
+            if rh % p or rw % p:
+                raise ValueError(f"reference latent {rh}x{rw} must have even sides (patch {p})")
+            rgh, rgw = rh // p, rw // p
+            patches = ref.reshape(b, c, rgh, p, rgw, p).permute(0, 2, 4, 1, 3, 5).reshape(b, rgh * rgw, c * p * p)
+            tokens.append(self.first(patches.to(self.dtype)))
+            rpos = torch.zeros(b, rgh, rgw, 3, device=img.device, dtype=torch.float32)
+            rpos[..., 0] = k
+            rpos[..., 1] = off_h + torch.arange(rgh, device=img.device, dtype=torch.float32)[:, None]
+            rpos[..., 2] = off_w + torch.arange(rgw, device=img.device, dtype=torch.float32)[None, :]
+            positions.append(rpos.view(b, rgh * rgw, 3))
+        return torch.cat(tokens, dim=1), torch.cat(positions, dim=1)

@@ -16,12 +16,21 @@ class LoraSpec(BaseModel):
     weight: float = Field(default=1.0, ge=-4.0, le=4.0, description="Strength: 1.0 - as trained, 0 - off")
 
 
+class OutpaintMargins(BaseModel):
+    """How far to extend reference 1 on each side, in percent of its own height (top, bottom) or width (left, right)."""
+
+    top: float = Field(default=0.0, ge=0.0, le=300.0)
+    bottom: float = Field(default=0.0, ge=0.0, le=300.0)
+    left: float = Field(default=0.0, ge=0.0, le=300.0)
+    right: float = Field(default=0.0, ge=0.0, le=300.0)
+
+
 class GenerateRequest(BaseModel):
     prompt: str
     negative_prompt: str = Field(default="", description="Only works when guidance_scale != 1 (that is, on raw checkpoints)")
 
     resolution: str = Field(default="720", description=f"One of: {list(RESOLUTION_TIERS)}")
-    aspect_ratio: str = Field(default="16:9", description=f"One of: {list(ASPECT_RATIOS)}")
+    aspect_ratio: str = Field(default="16:9", description=f"One of: {list(ASPECT_RATIOS)}; 'auto' is allowed only with references in 'scene' mode (the exact proportions of reference 1)")
 
     seed: int | None = Field(default=None, description="None - random")
     # None - the default for the checkpoint kind (turbo: 8 steps / 1.0, raw: 28 / 4.5)
@@ -34,6 +43,19 @@ class GenerateRequest(BaseModel):
 
     loras: list[LoraSpec] = Field(default_factory=list)
     enhance_prompt: bool = False
+
+    # Image-to-image and inpaint. Without init_image it is plain text-to-image.
+    init_image: str | None = Field(default=None, description="Base64 of a PNG or JPEG; a 'data:image/...;base64,' prefix is accepted")
+    strength: float | None = Field(default=None, gt=0.0, le=1.0, description="None - the mode default: 0.6 image-to-image, 1.0 inpaint. Needs init_image")
+    mask: str | None = Field(default=None, description="Base64 of a PNG: white = regenerate, black = keep. Needs init_image")
+    feather: int = Field(default=2, ge=0, le=32, description="Softness of the mask edge, in latent pixels (1 latent pixel = 8 image pixels)")
+
+    # Reference editing. Cannot be combined with init_image / mask.
+    references: list[str] = Field(default_factory=list, description="Base64 PNG/JPEG reference pictures. Up to config max_references")
+    reference_mode: str = Field(default="scene", pattern="^(scene|subjects)$", description="'scene': reference 1 is the main scene / landscape, the others are people or objects; 'subjects': all references are people or objects (aspect_ratio 'auto' is not allowed)")
+    outpaint: OutpaintMargins | None = Field(default=None, description="Extend reference 1 by these percentages and generate the new area around it. Needs references in 'scene' mode; replaces aspect_ratio (the frame is reference 1 plus the margins at the resolution's pixel budget). All zeros = off")
+    keep_original: bool = Field(default=False, description="Only with outpaint: keep reference 1's pixels unchanged and generate only the margins (a few pixels at the inner edges are blended to hide the seam). Off: the model also lightly redraws reference 1")
+    remove_background: str = Field(default="none", pattern="^(none|subjects)$", description="'subjects': cut the background out of the people / objects before use - references 2.. in 'scene' mode, all references in 'subjects' mode")
 
 
 class GenerateResponse(BaseModel):
@@ -51,6 +73,15 @@ class GenerateResponse(BaseModel):
     matmul: str = Field(description="Matrix multiplication mode used: exact, fp8 or fp8_all (see MY_DIFFUSION_MATMUL)")
     loras: list[LoraSpec]
     timings: dict[str, float]
+    mode: str = Field(default="text2image", description="text2image, image2image, inpaint or edit")
+    strength: float | None = None
+    feather: int | None = None
+    references: int = 0
+    reference_mode: str | None = None
+    outpaint: OutpaintMargins | None = Field(default=None, description="The margins actually applied; None when outpainting was off")
+    remove_background: str = Field(default="none", description="'subjects' if the background of some references was removed")
+    keep_original: bool = Field(default=False, description="True if reference 1's pixels were kept in an outpaint")
+    edit_lora_rank: int | None = None
 
 
 class EnhancePromptRequest(BaseModel):

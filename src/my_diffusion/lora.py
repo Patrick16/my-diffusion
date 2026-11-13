@@ -19,12 +19,14 @@ unrecognized, and the matrix sizes must match the model's layers."""
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 
+from .pinned import pin_tensors
 from .weights import QLinear, read_safetensors
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,15 @@ class LoraFile:
     layers: dict[str, tuple[torch.Tensor, torch.Tensor, float]] = field(default_factory=dict)
     # native layer name -> full correction to the matrix (".diff" format)
     diffs: dict[str, torch.Tensor] = field(default_factory=dict)
+    # only in a copy made by truncate_rank: native layer name -> share of the correction's energy kept (0..1)
+    kept_energy: dict[str, float] = field(default_factory=dict)
+    # truncate_rank results for this file, by rank: they live exactly as long as the file itself
+    truncated: dict[int, LoraFile] = field(default_factory=dict, repr=False)
+
+    @property
+    def worst_kept_energy(self) -> float:
+        """The smallest kept energy share over the layers; 1.0 if nothing was truncated."""
+        return min(self.kept_energy.values(), default=1.0)
 
 
 def load_lora(path: Path, model: nn.Module) -> LoraFile:
@@ -131,28 +142,115 @@ def clear_loras(model: nn.Module) -> None:
     for m in model.modules():
         if isinstance(m, QLinear):
             m.adapters.clear()
+            m.adapters_home.clear()
             m.deltas.clear()
 
 
-def apply_loras(model: nn.Module, loras: list[tuple[LoraFile, float]], device: str, dtype: torch.dtype = torch.bfloat16) -> None:
+def apply_loras(
+    model: nn.Module, loras: list[tuple[LoraFile, float]], device: str, dtype: torch.dtype = torch.bfloat16,
+    stream: bool = False,
+) -> None:
     """Attaches a set of LoRAs to the model, replacing the previous set.
 
         Several LoRAs on one layer are concatenated into one pair of matrices: the downs are stacked
         one under another, the ups side by side, and the strength of each is pre-multiplied into its up. Mathematically
-        it is the same sum of corrections, but in one multiplication instead of several."""
+        it is the same sum of corrections, but in one multiplication instead of several.
+
+        Why layer by layer, on the CPU. The pair for a layer is finished on the CPU (down cast to dtype; up taken
+        to float32, multiplied by alpha/r * strength, then cast to dtype; the concatenation too), and only that
+        finished pair goes to the device. Preparing everything on the GPU first would hold all the downs and
+        all the float32 ups there at once until the concatenation - about 2.5x the LoRA size at the peak, ~4 GB
+        for a rank-256 LoRA next to a 12.6 GB network. This way the peak is 1x the LoRA. The numbers are the
+        same bit for bit: a float32 multiplication and a rounding to bf16 give the same IEEE result on any device.
+
+        stream=True (settings.lora_streaming; only for a CUDA device): the finished pairs of the layers inside
+        the model's streamed blocks (QLinear.streamable) are not sent to the GPU at all. They are packed into
+        pinned RAM (QLinear.adapters_home), and each block copies its own pairs in right before it runs and
+        drops them right after (weights.streamed_adapters). So the LoRA costs the GPU one block's pairs instead
+        of the whole file (rank 128: ~30 MB instead of 0.85 GB), at the price of copying the whole LoRA over
+        PCIe on every pass of the network. The pairs are the very same tensors as without streaming, so the
+        result is identical. The other layers (and the ".diff" corrections) stay on the GPU as before."""
     clear_loras(model)
     targets = {name: m for name, m in model.named_modules() if isinstance(m, QLinear)}
-    stacked: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
+    active = [(lora, strength) for lora, strength in loras if strength != 0]
+    stream = stream and torch.device(device).type == "cuda"
 
-    for lora, strength in loras:
-        if strength == 0:
-            continue
-        for native, (down, up, scale) in lora.layers.items():
-            downs, ups = stacked.setdefault(native, ([], []))
-            downs.append(down.to(device, dtype))
-            ups.append(up.to(device, torch.float32) * (scale * strength))
+    for lora, strength in active:
         for native, diff in lora.diffs.items():
             targets[native].deltas.append((diff.to(device, dtype), strength))
 
-    for native, (downs, ups) in stacked.items():
-        targets[native].adapters.append((torch.cat(downs, dim=0), torch.cat(ups, dim=1).to(dtype), 1.0))
+    streamed: list[tuple[QLinear, torch.Tensor, torch.Tensor]] = []
+    # every layer that any of the LoRAs touches, in the order of first appearance
+    for native in dict.fromkeys(native for lora, _ in active for native in lora.layers):
+        downs, ups = [], []
+        for lora, strength in active:
+            if native in lora.layers:
+                down, up, scale = lora.layers[native]
+                downs.append(down.to(dtype))
+                ups.append((up.float() * (scale * strength)).to(dtype))
+        layer = targets[native]
+        if stream and layer.streamable:
+            streamed.append((layer, torch.cat(downs, dim=0), torch.cat(ups, dim=1)))
+        else:
+            layer.adapters.append((torch.cat(downs, dim=0).to(device), torch.cat(ups, dim=1).to(device), 1.0))
+
+    if streamed:
+        # one packed pinned copy of all the pairs (pin_tensors lays them into power-of-two chunks, see pinned.py)
+        pinned = pin_tensors([t for _, down, up in streamed for t in (down, up)])
+        for i, (layer, _, _) in enumerate(streamed):
+            layer.adapters_home.append((pinned[2 * i], pinned[2 * i + 1], 1.0))
+
+
+def truncate_rank(lora: LoraFile, rank: int) -> LoraFile:
+    """A copy of the LoRA in which every layer has rank at most `rank`: the closest such correction (SVD).
+
+    Why. Without LoRA streaming a LoRA lives on the GPU for as long as it is attached (with streaming it is copied over
+    PCIe on every pass, so a smaller rank is also less traffic); the identity-edit LoRA at rank 256 takes 1.7 GB, which
+    is what stops a 720 edit from fitting into 16 GB. Rank 128 halves that, and almost nothing is lost, because the
+    correction up @ down concentrates in its first directions: on that file the worst layer keeps 96% of the energy.
+
+    How. up @ down is never built as a full matrix (6144 x 16384 numbers for an MLP layer). Both factors are first
+    reduced by QR: up = Qu @ Ru, down.T = Qd @ Rd, so up @ down = Qu @ (Ru @ Rd.T) @ Qd.T, and only the small
+    r x r core is decomposed by SVD into U S Vh. The `rank` largest singular directions are kept, and sqrt(S) is
+    split evenly between the two new factors. The "kept energy" of a layer is sum(S[:rank]^2) / sum(S^2).
+    Computed on the CPU in float32; the result has the dtype of the file. Layers whose rank is already at most
+    `rank`, and the ".diff" layers, are shared with the original as is.
+
+    Returns the original object if no layer needed truncation. Otherwise the copy is remembered in
+    lora.truncated[rank], so the second call costs nothing and returns the same object (the engine compares the
+    attached LoRAs by identity); kept_energy / worst_kept_energy of the copy are for the caller's log."""
+    if rank < 1:
+        raise ValueError(f"rank must be at least 1, got {rank}")
+    if all(down.shape[0] <= rank for down, _, _ in lora.layers.values()):
+        return lora
+    if rank in lora.truncated:
+        return lora.truncated[rank]
+
+    t0 = time.time()
+    out = LoraFile(name=lora.name, diffs=dict(lora.diffs))
+    for native, (down, up, scale) in lora.layers.items():
+        if down.shape[0] <= rank:
+            out.layers[native] = (down, up, scale)
+            continue
+        new_down, new_up, kept = _truncate_pair(down, up, rank)
+        out.layers[native] = (new_down, new_up, scale)
+        out.kept_energy[native] = kept
+    lora.truncated[rank] = out
+    logger.info("LoRA %s: rank truncated to %d in %d layers, %.1fs, worst kept energy %.4f",
+                lora.name, rank, len(out.kept_energy), time.time() - t0, out.worst_kept_energy)
+    return out
+
+
+def _truncate_pair(down: torch.Tensor, up: torch.Tensor, rank: int) -> tuple[torch.Tensor, torch.Tensor, float]:
+    """One layer of truncate_rank: (down, up) -> the best pair of rank at most `rank`, and the kept energy share."""
+    d, u = down.to("cpu", torch.float32), up.to("cpu", torch.float32)
+    qu, ru = torch.linalg.qr(u)
+    qd, rd = torch.linalg.qr(d.T)
+    U, S, Vh = torch.linalg.svd(ru @ rd.T)
+    energy = S.square()
+    total = float(energy.sum())
+    kept = float(energy[:rank].sum()) / total if total > 0 else 1.0
+    root = S[:rank].sqrt()
+    new_down = (root[:, None] * (Vh[:rank] @ qd.T)).to(down.dtype)
+    new_up = ((qu @ U[:, :rank]) * root).to(up.dtype)
+    return new_down, new_up, kept
