@@ -79,6 +79,17 @@ def test_engine_bad_remove_background(engine):
         _call(engine, references=[PIC], remove_background="all")
 
 
+def test_engine_remove_background_with_nothing_to_cut(engine):
+    # One reference in scene mode is the scene itself: asking to cut "subjects" is a mistake, not a silent no-op.
+    with pytest.raises(ValueError, match="nothing to cut"):
+        _call(engine, references=[PIC], remove_background="subjects")
+
+
+def test_engine_unknown_aspect_ratio_with_outpaint(engine):
+    with pytest.raises(ValueError, match="aspect ratio"):
+        _call(engine, references=[PIC], outpaint=(0, 0, 0, 25), aspect_ratio="foo")
+
+
 def test_engine_missing_background_model(tmp_path):
     # The check uses the engine's own settings (models_dir given in code), not a fresh Settings() from the environment.
     engine = Krea2Engine(Settings(models_dir=tmp_path))
@@ -155,7 +166,7 @@ def test_api_zero_outpaint_passes_validation(client):
 @pytest.mark.parametrize("extra, message", [
     (["--outpaint", "0", "0", "0", "25"], "needs --reference"),
     (["--reference", "x.png", "--reference-mode", "subjects", "--outpaint", "0", "0", "0", "25"], "--reference-mode scene"),
-    (["--reference", "x.png", "--outpaint", "0", "0", "-5", "25"], "must not be negative"),
+    (["--reference", "x.png", "--outpaint", "0", "0", "-5", "25"], "numbers from 0 to 300"),
 ])
 def test_cli_rejects_bad_outpaint(monkeypatch, capsys, extra, message):
     from my_diffusion import cli

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 from pathlib import Path
 
 from .config import Settings
@@ -57,8 +58,8 @@ def main() -> None:
             parser.error("--outpaint needs --reference")
         if args.reference_mode != "scene":
             parser.error("--outpaint needs --reference-mode scene")
-        if any(v < 0 for v in args.outpaint):
-            parser.error("--outpaint margins must not be negative")
+        if any(not math.isfinite(v) or v < 0 or v > 300 for v in args.outpaint):
+            parser.error("--outpaint margins must be numbers from 0 to 300 (percent)")
     if args.aspect_ratio == "auto" and args.reference_mode != "scene":
         parser.error("--aspect-ratio auto needs --reference-mode scene")
     if len(args.reference) > 2:

@@ -86,6 +86,8 @@ async def _run(func, *args, **kwargs):
         raise HTTPException(404, str(exc)) from exc
     except (ValueError, NotImplementedError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    except ImportError as exc:   # an optional package is missing on this machine: a server problem, not a bad request
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.get("/health")

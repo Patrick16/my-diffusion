@@ -14,6 +14,7 @@ are cached: repeating the same prompt (for example, with another seed) does not 
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import random
 import threading
@@ -29,7 +30,7 @@ from .config import Settings
 from .imaging import cover_crop
 from .lora import LoraFile, apply_loras, load_lora, truncate_rank
 from .memory import GpuSlot, Resident
-from .resolutions import ASPECT_RATIOS, resolve_dimensions, resolve_dimensions_from_size
+from .resolutions import ASPECT_RATIOS, max_pixels, resolve_dimensions, resolve_dimensions_from_size
 from .text_encoder import QwenVL
 from .transformer import Krea2Transformer, set_attention_kernel
 from .vae import LATENT_CHANNELS, VAE_SCALE, LatentDecoder
@@ -57,12 +58,6 @@ EDIT_DEFAULTS = {
     "turbo": {"steps": 8, "guidance_scale": 1.0},
     "raw": {"steps": 20, "guidance_scale": 3.0},
 }
-
-
-def _tier_max_pixels(tier: str) -> int:
-    """The largest frame (in pixels) of a resolution tier over all aspect ratios: rounding the sides to
-    multiples of 16 makes some formats of a tier slightly larger than its 16:9 frame."""
-    return max(w * h for w, h in (resolve_dimensions(tier, ratio) for ratio in ASPECT_RATIOS))
 
 
 # What an edit fits into 16 GB of VRAM (measured with the reference probe on a 16 GB laptop GPU): the
@@ -394,9 +389,19 @@ class Krea2Engine:
                 raise ValueError("aspect_ratio 'auto' takes the proportions of reference 1, so it needs references")
             if reference_mode != "scene":
                 raise ValueError("aspect_ratio 'auto' needs reference_mode 'scene': with 'subjects' no picture is the scene to take the size from")
+        if not auto_size and aspect_ratio not in ASPECT_RATIOS:   # also checked when outpaint makes the preset unused
+            raise ValueError(f"Unknown aspect ratio: {aspect_ratio!r}. Available: {[*ASPECT_RATIOS, 'auto']}")
         # Which references lose their background: the people / objects, never the scene.
         first_subject = 1 if reference_mode == "scene" else 0
         cut_background = remove_background == "subjects" and len(references) > first_subject
+        if remove_background == "subjects" and not cut_background:
+            raise ValueError(
+                "remove_background 'subjects' has nothing to cut: it needs a people / objects reference "
+                "(reference 2 in 'scene' mode, any reference in 'subjects' mode)"
+            )
+        if cut_background and importlib.util.find_spec("onnxruntime") is None:
+            raise ImportError("background removal needs the onnxruntime package (run `uv sync`)")
+        lora_files = [(self._lora(name), weight) for name, weight in loras]   # read in advance: a name error surfaces before the heavy work
         # The engine's own settings, not background.model_path(): that one reads a fresh Settings() from the
         # environment and would miss a models_dir given to this engine in code.
         rembg_path = s.rembg_model_path
@@ -420,7 +425,7 @@ class Krea2Engine:
             width, height = resolve_dimensions(resolution, aspect_ratio)
         if references:
             tier = EDIT_MAX_TIER[min(len(references), 2)]
-            if width * height > _tier_max_pixels(tier):
+            if width * height > max_pixels(tier):
                 raise ValueError(
                     f"an edit with {len(references)} reference(s) at {width}x{height} does not fit the GPU; use resolution {tier} or lower"
                 )
@@ -466,7 +471,6 @@ class Krea2Engine:
             logger.debug("reference %d: %dx%d -> frame %dx%d at token offset %s", k + 1, *ref.size, *frame.size, offset)
         # The vision tower sees the same frames as the VAE, shrunk to its size cap.
         vision_frames = [imaging.cap_longest_side(frame, s.vision_max_side) for frame in frames]
-        lora_files = [(self._lora(name), weight) for name, weight in loras]   # read in advance: a name error surfaces before the heavy work
         edit_rank = None
         if references:
             lora_files, edit_rank = self._with_edit_lora(lora_files, width, height, len(references))

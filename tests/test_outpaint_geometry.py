@@ -90,3 +90,30 @@ def test_negative_margins_rejected():
 def test_bad_source_size_rejected():
     with pytest.raises(ValueError):
         outpaint_frame(0, 100, Margins(), "720")
+
+
+def test_exact_sizes_never_exceed_the_tier_limit():
+    """The engine rejects frames above the tier's largest preset frame; exact-ratio sizes must fit it
+    (rounding both sides to the nearest 16 used to overshoot for ~40% of random sources)."""
+    import random
+
+    from my_diffusion.imaging import Margins, outpaint_frame
+    from my_diffusion.resolutions import max_pixels, resolve_dimensions_from_size
+
+    rng = random.Random(7)
+    for _ in range(3000):
+        tier = rng.choice(["480", "720"])
+        w, h = rng.randint(1, 4000), rng.randint(1, 4000)
+        size = resolve_dimensions_from_size(tier, w, h)
+        assert size.width % 16 == 0 and size.height % 16 == 0
+        assert size.width * size.height <= max_pixels(tier)
+        margins = Margins(*(rng.choice([0, 0, rng.uniform(0, 300)]) for _ in range(4)))
+        fw, fh, _ = outpaint_frame(w, h, margins, tier)
+        assert fw * fh <= max_pixels(tier)
+
+
+def test_known_overshoot_cases_now_fit():
+    from my_diffusion.resolutions import max_pixels, resolve_dimensions_from_size
+
+    size = resolve_dimensions_from_size("720", 1000, 333)   # was 1664x560 = 931840 > 921600
+    assert size.width * size.height <= max_pixels("720")

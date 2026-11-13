@@ -59,6 +59,12 @@ def _pixel_budget(tier: str) -> int:
     return round(height_16_9 * width_16_9)
 
 
+def max_pixels(tier: str) -> int:
+    """The largest frame (in pixels) of a tier over all preset aspect ratios: rounding the sides to
+    multiples of 16 makes some formats slightly larger than the tier's 16:9 frame."""
+    return max(w * h for w, h in (resolve_dimensions(tier, ratio) for ratio in ASPECT_RATIOS))
+
+
 def resolve_dimensions(tier: str, aspect_ratio: str) -> Dimensions:
     """tier ('480'|'720'|'1080') + aspect_ratio ('16:9', ...) -> (width, height).
 
@@ -89,7 +95,19 @@ def resolve_dimensions_from_size(tier: str, width: float, height: float) -> Dime
     if not (width > 0 and height > 0 and math.isfinite(width) and math.isfinite(height)):
         raise ValueError(f"picture size must be positive, got {width}x{height}")
     scale = math.sqrt(_pixel_budget(tier) / (width * height))
-    return Dimensions(width=_round_to_block(width * scale), height=_round_to_block(height * scale))
+    raw_w, raw_h = width * scale, height * scale
+    w, h = _round_to_block(raw_w), _round_to_block(raw_h)
+    # Rounding both sides to the nearest 16 can push the area a few percent over the tier's largest
+    # preset frame, which the edit-size check in the engine would then reject. Step the side whose
+    # rounding hurt the aspect ratio least down by one block until the frame fits.
+    limit = max_pixels(tier)
+    while w * h > limit:
+        options = [(w - BLOCK_SIZE, h), (w, h - BLOCK_SIZE)]
+        options = [(a, b) for a, b in options if a >= BLOCK_SIZE and b >= BLOCK_SIZE]
+        if not options:
+            break
+        w, h = min(options, key=lambda ab: abs(math.log(ab[0] / ab[1]) - math.log(raw_w / raw_h)))
+    return Dimensions(width=w, height=h)
 
 
 def nearest_aspect_ratio(width: int, height: int) -> str:
