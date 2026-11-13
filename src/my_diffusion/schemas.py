@@ -21,7 +21,7 @@ class GenerateRequest(BaseModel):
     negative_prompt: str = Field(default="", description="Only works when guidance_scale != 1 (that is, on raw checkpoints)")
 
     resolution: str = Field(default="720", description=f"One of: {list(RESOLUTION_TIERS)}")
-    aspect_ratio: str = Field(default="16:9", description=f"One of: {list(ASPECT_RATIOS)}")
+    aspect_ratio: str = Field(default="16:9", description=f"One of: {list(ASPECT_RATIOS)}; 'auto' is allowed only with references (the ratio nearest to reference 1)")
 
     seed: int | None = Field(default=None, description="None - random")
     # None - the default for the checkpoint kind (turbo: 8 steps / 1.0, raw: 28 / 4.5)
@@ -34,6 +34,15 @@ class GenerateRequest(BaseModel):
 
     loras: list[LoraSpec] = Field(default_factory=list)
     enhance_prompt: bool = False
+
+    # Image-to-image and inpaint. Without init_image it is plain text-to-image.
+    init_image: str | None = Field(default=None, description="Base64 of a PNG or JPEG; a 'data:image/...;base64,' prefix is accepted")
+    strength: float | None = Field(default=None, gt=0.0, le=1.0, description="None - the mode default: 0.6 image-to-image, 1.0 inpaint. Needs init_image")
+    mask: str | None = Field(default=None, description="Base64 of a PNG: white = regenerate, black = keep. Needs init_image")
+    feather: int = Field(default=2, ge=0, le=32, description="Softness of the mask edge, in latent pixels (1 latent pixel = 8 image pixels)")
+
+    # Reference editing. Cannot be combined with init_image / mask.
+    references: list[str] = Field(default_factory=list, description="Base64 PNG/JPEG reference pictures; 1 = the scene, 2 = a subject or person. Up to config max_references")
 
 
 class GenerateResponse(BaseModel):
@@ -51,6 +60,11 @@ class GenerateResponse(BaseModel):
     matmul: str = Field(description="Matrix multiplication mode used: exact, fp8 or fp8_all (see MY_DIFFUSION_MATMUL)")
     loras: list[LoraSpec]
     timings: dict[str, float]
+    mode: str = Field(default="text2image", description="text2image, image2image, inpaint or edit")
+    strength: float | None = None
+    feather: int | None = None
+    references: int = 0
+    edit_lora_rank: int | None = None
 
 
 class EnhancePromptRequest(BaseModel):

@@ -1,4 +1,4 @@
-"""VAE: converts the latent into pixels.
+"""VAE: converts the latent into pixels (decode) and pixels into the latent (encode).
 
 The Krea 2 network works not with pixels but with a "latent" - an image compressed 8 times
 per side, with 16 channels instead of 3. That is 12 times fewer numbers, so generation
@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image
 from safetensors.torch import load_file
@@ -56,6 +57,29 @@ class LatentDecoder:
         of 0.36 on average out of 255. Therefore: where float32 fits with room to spare, we use it;
         for large sizes we switch to half precision."""
         return torch.float32 if pixels <= FP32_MAX_PIXELS else torch.bfloat16
+
+    @torch.inference_mode()
+    def encode(self, image: Image.Image) -> torch.Tensor:
+        """PIL image -> latent (1, 16, H/8, W/8) in the model's normalized space, float32.
+
+        The exact inverse of `decode`: the VAE encoder gives a distribution over latents, we take its
+        mode (the most likely value, no random noise, so the same picture always gives the same latent),
+        then apply the opposite normalization: (z - mean) / std. This is what lets an existing picture
+        enter the sampler as if it were a finished generation (image-to-image, inpaint).
+        The image sides must be multiples of 8 (use `imaging.cover_crop` with a resolution from the
+        resolution table, which already guarantees this)."""
+        width, height = image.size
+        if width % VAE_SCALE or height % VAE_SCALE:
+            raise ValueError(f"image size {width}x{height} must be a multiple of {VAE_SCALE}")
+        device = next(self.vae.parameters()).device
+        dtype = self._dtype_for(width * height)
+        self.vae.to(dtype)
+        array = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        pixels = torch.from_numpy(array.copy()).permute(2, 0, 1).unsqueeze(0).float() / 127.5 - 1   # (1, 3, H, W), -1..1
+        pixels = pixels.to(device, dtype).unsqueeze(2)                                                # time axis: (1, 3, 1, H, W)
+        z = self.vae.encode(pixels).latent_dist.mode().float()                                        # (1, 16, 1, h, w)
+        z = (z - self.mean.to(device)) / self.std.to(device)
+        return z[:, :, 0]
 
     @torch.inference_mode()
     def decode(self, latent: torch.Tensor) -> Image.Image:

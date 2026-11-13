@@ -4,6 +4,8 @@ Order of processing one request:
 
     [Qwen on the GPU]     (optional) the enhancer rewrites the prompt
                           prompt and negative prompt -> hidden states
+                          (editing: together with the reference pictures, through the vision tower)
+    [VAE on the GPU]      (image-to-image, inpaint, editing) input pictures -> clean latents
     [network on the GPU]  attach LoRAs, noise -> latent in N steps
     [VAE on the GPU]      latent -> pixels -> PNG
 
@@ -20,12 +22,14 @@ from collections import OrderedDict
 from pathlib import Path
 
 import torch
+from PIL import Image
 
-from . import sampler
+from . import imaging, sampler
 from .config import Settings
-from .lora import LoraFile, apply_loras, load_lora
+from .imaging import cover_crop
+from .lora import LoraFile, apply_loras, load_lora, truncate_rank
 from .memory import GpuSlot, Resident
-from .resolutions import resolve_dimensions
+from .resolutions import ASPECT_RATIOS, nearest_aspect_ratio, resolve_dimensions
 from .text_encoder import QwenVL
 from .transformer import Krea2Transformer, set_attention_kernel
 from .vae import LATENT_CHANNELS, VAE_SCALE, LatentDecoder
@@ -34,6 +38,9 @@ from .weights import load_into, read_checkpoint, set_matmul
 logger = logging.getLogger(__name__)
 
 MAX_SEED = 2**32 - 1
+# XOR-ed into the seed for the starting noise of an edit (see _generate): keeps the edit from reusing the
+# noise of a picture generated with the same seed and size.
+EDIT_NOISE_SALT = 0x5EED_ED17
 
 # How the two kinds of Krea 2 checkpoints differ:
 #   turbo - distilled: few steps and no CFG (guidance 1.0 = off);
@@ -42,6 +49,44 @@ KIND_DEFAULTS = {
     "turbo": {"steps": 8, "guidance_scale": 1.0},
     "raw": {"steps": 28, "guidance_scale": 4.5},
 }
+
+# The same for reference editing (generate with references), as in Wan2GP's edit presets. Turbo keeps its
+# defaults. Raw takes 20 steps and guidance 3.0: Wan2GP's raw-edit preset says 2, but Wan2GP applies
+# guidance + 1 as the real CFG scale, so its 2 is our 3.0.
+EDIT_DEFAULTS = {
+    "turbo": {"steps": 8, "guidance_scale": 1.0},
+    "raw": {"steps": 20, "guidance_scale": 3.0},
+}
+
+
+def _tier_max_pixels(tier: str) -> int:
+    """The largest frame (in pixels) of a resolution tier over all aspect ratios: rounding the sides to
+    multiples of 16 makes some formats of a tier slightly larger than its 16:9 frame."""
+    return max(w * h for w, h in (resolve_dimensions(tier, ratio) for ratio in ASPECT_RATIOS))
+
+
+# What an edit fits into 16 GB of VRAM (measured with the reference probe on a 16 GB laptop GPU): the
+# network, the edit LoRA and the reference tokens all sit on the GPU together.
+#   - output size, by the number of references: one reference up to the 720 tier, two only at 480;
+#   - the edit LoRA at its full rank 256 (+1.7 GB) only for one reference at the 480 tier. Otherwise it is
+#     truncated to rank 128 (+0.85 GB, see lora.truncate_rank); at 720 that was checked to look right.
+#   - these LoRA sizes are for settings.lora_streaming=False; with streaming (the default) the LoRA waits in
+#     pinned RAM and only one block's pairs are on the GPU at a time (lora.apply_loras).
+EDIT_MAX_TIER = {1: "720", 2: "480"}
+EDIT_RANK_REDUCED = 128   # the edit LoRA is always used at this rank, see edit_lora_rank
+
+IMAGE_CACHE_SIZE = 8   # encodings with pictures are large (~27 MB each: ~440 tokens x 12 layers x 2560), keep fewer
+
+
+def edit_lora_rank(width: int, height: int, references: int) -> int:
+    """Rank of the edit LoRA for every edit: EDIT_RANK_REDUCED (128).
+
+    Measured on the GPU: rank 256 showed no visible gain over 128 on the same frames (the pictures differ
+    by 7-20 units on average, with the same identity and the same edit), while at 256 the adapter takes
+    1.7 GB of VRAM. That pushes the run to the edge of the 16 GB card, and the excess spills into shared
+    memory, which made the same edit 8-10 times slower in a plain CLI process. The size and reference
+    count are kept in the signature so the call site stays the same if this rule changes again."""
+    return EDIT_RANK_REDUCED
 
 ENHANCER_SYSTEM_PROMPT = """You are a prompt writer for a text-to-image model.
 Rewrite the user's idea as one detailed image description in natural English prose:
@@ -64,8 +109,11 @@ class Krea2Engine:
         self.matmul: str = settings.matmul   # matrix multiplication mode; changed via set_matmul
         self.native_layers = 0               # how many layers are currently computed via the native fp8 path
         self._text_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
+        # encodings with pictures (editing): key = (prompt, digests of the prepared frames)
+        self._image_cache: OrderedDict[tuple[str, tuple[str, ...]], torch.Tensor] = OrderedDict()
         self._lora_cache: OrderedDict[tuple[str, float], LoraFile] = OrderedDict()
         self._applied_loras: list[tuple[LoraFile, float]] = []   # the set of LoRAs currently attached to the network
+        self._applied_streaming = settings.lora_streaming        # whether that set was attached with LoRA streaming
         self._lock = threading.Lock()   # one generation at a time: there is one GPU
 
     # ------------------------------------------------------------------ loading
@@ -153,6 +201,24 @@ class Krea2Engine:
             self._text_cache.popitem(last=False)
         return cond
 
+    def _encode_with_images(self, prompt: str, frames: list[Image.Image]) -> torch.Tensor:
+        """Prompt + pictures -> Qwen hidden states (editing), with its own small cache.
+
+        The key is the prompt plus a digest of each frame's pixels: the frames are already prepared for
+        this request's output size, so the same upload at another resolution is another frame and is
+        encoded anew, while repeating the request (for example with another seed) costs nothing."""
+        key = (prompt, tuple(imaging.image_digest(frame) for frame in frames))
+        cached = self._image_cache.get(key)
+        if cached is not None:
+            self._image_cache.move_to_end(key)
+            return cached
+        self.gpu.use("qwen")
+        cond = self.qwen.encode(prompt, images=frames).cpu()
+        self._image_cache[key] = cond
+        while len(self._image_cache) > IMAGE_CACHE_SIZE:
+            self._image_cache.popitem(last=False)
+        return cond
+
     # ------------------------------------------------------------------ LoRA
     def _inside(self, folder: Path, name: str) -> Path:
         """Path to a file inside folder; does not allow escaping it via '..'."""
@@ -177,6 +243,34 @@ class Krea2Engine:
         self._lora_cache.move_to_end(key)
         return self._lora_cache[key]
 
+    def _with_edit_lora(
+        self, lora_files: list[tuple[LoraFile, float]], width: int, height: int, references: int,
+    ) -> tuple[list[tuple[LoraFile, float]], int | None]:
+        """The LoRA set of an edit: the request's LoRAs plus the edit LoRA, at a rank that fits the GPU.
+
+        The edit LoRA (settings.edit_lora) is added with settings.edit_lora_weight unless the request
+        names it itself; then the request's weight is used, and 0 switches it off. If the rank budget
+        (edit_lora_rank) is below the file's rank, the file is replaced by its truncated copy. The copy
+        is made once and kept on the file object (LoraFile.truncated), so a repeated request passes the
+        very same object and the attached set is not rebuilt; the full file and its copy are different
+        objects, so switching between them does rebuild it. Returns the set and the rank actually used
+        (None if the edit LoRA is off)."""
+        s = self.settings
+        edit = self._lora(s.edit_lora)   # the same cached object as when the request names this file
+        if not any(f is edit for f, _ in lora_files):
+            lora_files = lora_files + [(edit, s.edit_lora_weight)]
+        if all(w == 0 for f, w in lora_files if f is edit):
+            return lora_files, None
+        used = truncate_rank(edit, edit_lora_rank(width, height, references))   # `edit` itself if it fits
+        rank = max((down.shape[0] for down, _, _ in used.layers.values()), default=None)
+        if used is not edit:
+            logger.info(
+                "edit LoRA %s: rank %d -> %d for %dx%d with %d reference(s), worst kept energy %.4f",
+                edit.name, max(down.shape[0] for down, _, _ in edit.layers.values()), rank, width, height,
+                references, used.worst_kept_energy,
+            )
+        return [(used if f is edit else f, w) for f, w in lora_files], rank
+
     def list_files(self, kind: str) -> list[str]:
         folder = (self.settings.models_dir / kind).resolve()
         patterns = ("*.safetensors", "*.gguf") if kind == "checkpoints" else ("*.safetensors",)
@@ -196,38 +290,139 @@ class Krea2Engine:
         loras: list[tuple[str, float]] | None = None,
         enhance: bool = False,
         guidance_interval: tuple[float, float] = (0.0, 1.0),
+        init_image: Image.Image | None = None,
+        strength: float | None = None,
+        mask: Image.Image | None = None,
+        feather: int = 2,
+        references: list[Image.Image] | None = None,
     ) -> dict:
         """guidance_interval - the part of the run (as fractions of the steps) where CFG is applied;
-        only matters when guidance_scale != 1. See sampler.sample."""
+        only matters when guidance_scale != 1. See sampler.sample.
+
+        init_image / strength - image-to-image. The picture is cropped to the requested size, encoded
+        to a latent and noised up to the starting level of the schedule; the network then removes the
+        noise only in the remaining steps. So the composition of the original survives when strength
+        is low (0.3 changes little, 1.0 is the same as text-to-image and the picture is ignored in effect).
+        strength is ignored without init_image. None means the mode's default: 0.6 for image-to-image,
+        1.0 for inpaint.
+
+        mask / feather - inpaint (needs init_image). White in the mask = regenerate, black = keep.
+        The mask is cropped to the same frame as the picture and shrunk to the latent grid; feather
+        softens its edge by that many latent pixels (1 latent pixel = 8 image pixels), which hides the
+        seam. After every step the kept area is put back to the original picture at the current noise
+        level, so only the white area is really generated. Default strength for inpaint is 1.0: the
+        white area starts from pure noise and is not tied to what was there before; a lower strength
+        keeps a hint of the old content inside the mask (useful to recolour or restyle, not to replace).
+
+        references - reference editing: 1 or 2 pictures (settings.max_references) the result is built
+        from; the prompt says what to do with them ("put the cat from image 1 on a bridge"). Reference 1 is
+        the scene: it is cropped to the output frame exactly like init_image. Reference 2 is a subject or a
+        person: it keeps its own proportions and is fitted into the frame (imaging.fit_reference).
+        aspect_ratio="auto" (only with references) picks the format closest to reference 1.
+        Editing switches on three things that only work together: the prepared pictures go into the Qwen
+        prompt through its vision tower (the negative prompt, under CFG, gets the same pictures); their
+        clean latents are appended to the network's sequence (see Krea2Transformer.forward); and the edit
+        LoRA (settings.edit_lora) is attached, at rank 128 instead of 256 when the full rank would not fit
+        the GPU (see _with_edit_lora). Each reference roughly doubles the attention's work per step.
+        Not combinable with init_image or mask."""
         if not self.loaded:
             raise RuntimeError("the engine is not loaded yet")
         with self._lock:
             return self._generate(
                 prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
-                tuple(guidance_interval),
+                tuple(guidance_interval), init_image, strength, mask, feather, list(references or []),
             )
 
-    def _generate(self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval) -> dict:
+    def _generate(
+        self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval,
+        init_image=None, strength=None, mask=None, feather=2, references=None,
+    ) -> dict:
         s = self.settings
-        defaults = KIND_DEFAULTS[self.kind]
+        references = list(references or [])
+        if len(references) > s.max_references:
+            raise ValueError(f"at most {s.max_references} reference pictures are supported, got {len(references)}")
+        if references and (init_image is not None or mask is not None):
+            raise ValueError("references cannot be combined with an init image or a mask: editing builds the picture from the references")
+        if aspect_ratio == "auto":
+            if not references:
+                raise ValueError("aspect_ratio 'auto' takes the proportions of reference 1, so it needs references")
+            aspect_ratio = nearest_aspect_ratio(*references[0].size)
+        defaults = (EDIT_DEFAULTS if references else KIND_DEFAULTS)[self.kind]
         steps = steps or defaults["steps"]
         guidance_scale = defaults["guidance_scale"] if guidance_scale is None else guidance_scale
         sampler.guided_steps(steps, guidance_interval)   # validate now: a bad interval surfaces before the heavy work
         seed = random.randint(0, MAX_SEED) if seed is None else seed
         width, height = resolve_dimensions(resolution, aspect_ratio)
+        if references:
+            tier = EDIT_MAX_TIER[min(len(references), 2)]
+            if width * height > _tier_max_pixels(tier):
+                raise ValueError(
+                    f"an edit with {len(references)} reference(s) at {width}x{height} does not fit the GPU; use resolution {tier} or lower"
+                )
+        if mask is not None and init_image is None:
+            raise ValueError("a mask needs an init image: inpaint regenerates the white part of the mask in a given picture")
+        if init_image is not None:
+            if strength is None:
+                strength = 1.0 if mask is not None else 0.6
+            image_steps = sampler.img2img_steps(steps, strength)   # validate strength before the heavy work
+        weight = None
+        if mask is not None:
+            # The mask goes through the same cover_crop as the picture, so both share one frame, then is
+            # shrunk to the latent grid (1 = regenerate, 0 = keep). Cheap and on the CPU: done here, so
+            # a bad mask or feather surfaces before the heavy work.
+            weight = imaging.mask_to_latent(cover_crop(mask, width, height), height // VAE_SCALE, width // VAE_SCALE, feather)
+        # Editing: the reference frames, prepared on the CPU now (cheap). Reference 1 is the scene and gets
+        # the output frame itself; the others keep their proportions and sit centred in the frame, at an
+        # offset in tokens. Every side is a multiple of 16, so each latent cuts into whole 2x2 patches.
+        frames: list[Image.Image] = []
+        offsets: list[tuple[int, int]] = []
+        for k, ref in enumerate(references):
+            if k == 0:
+                frame, offset = cover_crop(ref.convert("RGB"), width, height), (0, 0)
+            else:
+                frame, offset = imaging.fit_reference(ref, width, height)
+            frames.append(frame)
+            offsets.append(offset)
+            logger.debug("reference %d: %dx%d -> frame %dx%d at token offset %s", k + 1, *ref.size, *frame.size, offset)
+        # The vision tower sees the same frames as the VAE, shrunk to its size cap.
+        vision_frames = [imaging.cap_longest_side(frame, s.vision_max_side) for frame in frames]
         lora_files = [(self._lora(name), weight) for name, weight in loras]   # read in advance: a name error surfaces before the heavy work
+        edit_rank = None
+        if references:
+            lora_files, edit_rank = self._with_edit_lora(lora_files, width, height, len(references))
         timings: dict[str, float] = {}
         t_all = time.time()
 
-        # 1. text
+        # 1. text (with the reference pictures when editing)
         t0 = time.time()
         enhanced = self._enhance(prompt, seed) if enhance else None
         timings["enhance"] = time.time() - t0
         t0 = time.time()
         use_cfg = guidance_scale != 1.0
-        cond = self._encode(enhanced or prompt)
-        uncond = self._encode(negative_prompt) if use_cfg else None
+        if references:
+            # The unconditional context of an edit is "the same pictures + the negative text".
+            cond = self._encode_with_images(enhanced or prompt, vision_frames)
+            uncond = self._encode_with_images(negative_prompt, vision_frames) if use_cfg else None
+        else:
+            cond = self._encode(enhanced or prompt)
+            uncond = self._encode(negative_prompt) if use_cfg else None
         timings["encode"] = time.time() - t0
+
+        # 1b. image-to-image: the original picture -> latent (VAE first, the network is not on the GPU yet)
+        latent0 = None
+        if init_image is not None:
+            t0 = time.time()
+            self.gpu.use("vae")
+            latent0 = self.vae.encode(cover_crop(init_image, width, height))
+            timings["encode_image"] = time.time() - t0
+
+        # 1c. editing: each reference frame -> clean latent, also in the VAE stage
+        refs = None
+        if references:
+            t0 = time.time()
+            self.gpu.use("vae")
+            refs = [(self.vae.encode(frame), offset) for frame, offset in zip(frames, offsets)]
+            timings["encode_references"] = time.time() - t0
 
         # 2. noise -> latent
         t0 = time.time()
@@ -235,27 +430,64 @@ class Krea2Engine:
         # The same LoRA set with the same weights as in the previous request is already attached and sits
         # on the GPU - we do not move it again. We compare the objects themselves (is), not the names:
         # a file changed on disk is read into a new object (see _lora).
-        same = len(lora_files) == len(self._applied_loras) and all(
+        # A change of settings.lora_streaming also rebuilds the set: the pairs then move between RAM and the GPU.
+        same = s.lora_streaming == self._applied_streaming and len(lora_files) == len(self._applied_loras) and all(
             new is old and w_new == w_old for (new, w_new), (old, w_old) in zip(lora_files, self._applied_loras)
         )
         if not same:
-            apply_loras(self.model, lora_files, s.device)
+            apply_loras(self.model, lora_files, s.device, stream=s.lora_streaming)
             self._applied_loras = list(lora_files)
+            self._applied_streaming = s.lora_streaming
         timings["load_model"] = time.time() - t0
 
         lat_h, lat_w = height // VAE_SCALE, width // VAE_SCALE
         tokens = (lat_h // 2) * (lat_w // 2)
         mu = sampler.auto_mu(tokens) if shift is None else shift
-        sigmas = sampler.make_sigmas(steps, mu)
-        noise = sampler.make_noise(seed, LATENT_CHANNELS, lat_h, lat_w).to(s.device)
+        # mu comes from the FULL image size, also in image-to-image: the schedule is the same one text-to-image
+        # would use, and image-to-image only runs its tail.
+        # In edit mode the noise uses a salted seed. The sampler's noise depends only on the seed and the shape,
+        # so an edit with the same seed and size as the picture that was generated would start from that
+        # picture's own noise, and the reference-token path then reproduces the reference (measured: a
+        # 736x560 fox at seed 42 came back as a near-copy; seed 43 edited correctly). The salt makes the
+        # starting noise differ from the one that made the reference, while staying reproducible.
+        noise_seed = seed ^ EDIT_NOISE_SALT if references else seed
+        noise = sampler.make_noise(noise_seed, LATENT_CHANNELS, lat_h, lat_w).to(s.device)
+        post_step = None
+        if latent0 is None:
+            sigmas = sampler.make_sigmas(steps, mu)
+            start = noise
+        else:
+            latent0 = latent0.to(noise)
+            sigmas = sampler.make_sigmas(steps, mu, skip=steps - image_steps)
+            start = sampler.add_noise(latent0, noise, sigmas[0])
+        # mu above counts only the generated picture's tokens: the references are context, not output.
+        if refs is not None:
+            refs = [(latent_k.to(noise), offset) for latent_k, offset in refs]
+        if weight is not None:
+            weight = weight.to(noise)   # float32 on the device of x; broadcasts over the 16 channels
+
+            def post_step(x: torch.Tensor, sigma_next: float) -> torch.Tensor:
+                # Inpaint blend (latent blend, as in RePaint): after each step the kept area is replaced
+                # by the original picture noised to the level the new x is at. Both latents are in the
+                # same normalized space (vae.encode returns it), so mixing them is meaningful.
+                # The noise MUST be the same tensor that built `start`. Then the kept area moves along the
+                # very same straight line noise -> picture that it started on, and at every step it is
+                # exactly where a run that "knew" the picture would be. With fresh noise each step, the
+                # kept area would jump between different lines: the network sees inconsistent noise around
+                # the mask, the generated area adapts to noise that later vanishes, and seams and blotches
+                # appear along the border. After the last step sigma_next = 0, so `known` is latent0 itself.
+                known = sampler.add_noise(latent0, noise, sigma_next)
+                return weight * x + (1.0 - weight) * known
 
         t0 = time.time()
         torch.cuda.reset_peak_memory_stats()
         latent = sampler.sample(
-            self.model, noise, cond.to(s.device), sigmas,
+            self.model, start, cond.to(s.device), sigmas,
             uncond=None if uncond is None else uncond.to(s.device), guidance_scale=guidance_scale,
-            guidance_interval=guidance_interval,
+            guidance_interval=guidance_interval, post_step=post_step, refs=refs,
         )
+        # No extra composite after the loop: the last post_step already puts latent0 back outside the mask
+        # (sigma_next = 0). A second blend would apply the feathered weight twice on the soft edge.
         timings["sample"] = time.time() - t0
         peak_vram = torch.cuda.max_memory_allocated() / 2**30
 
@@ -281,5 +513,10 @@ class Krea2Engine:
             "checkpoint": self.checkpoint_name,
             "matmul": self.matmul if self.native_layers else "exact",   # the mode the image was actually computed with
             "loras": [{"name": f.name, "weight": w} for f, w in lora_files],
+            "mode": "edit" if references else "text2image" if init_image is None else ("inpaint" if mask is not None else "image2image"),
+            "strength": None if init_image is None else strength,
+            "feather": None if mask is None else feather,
+            "references": len(references),
+            "edit_lora_rank": edit_rank,   # None without editing or with the edit LoRA switched off
             "timings": {k: round(v, 2) for k, v in timings.items()},
         }

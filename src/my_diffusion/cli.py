@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 from .config import Settings
 from .engine import Krea2Engine
+from .imaging import load_rgb
 from .resolutions import ASPECT_RATIOS, RESOLUTION_TIERS
 from .transformer import ATTENTION_KERNELS
 from .weights import MATMUL_MODES
@@ -28,7 +30,7 @@ def main() -> None:
     parser.add_argument("prompt")
     parser.add_argument("--negative-prompt", default="")
     parser.add_argument("--resolution", choices=list(RESOLUTION_TIERS), default="720")
-    parser.add_argument("--aspect-ratio", choices=list(ASPECT_RATIOS), default="16:9")
+    parser.add_argument("--aspect-ratio", choices=[*ASPECT_RATIOS, "auto"], default="16:9", help="'auto' (only with --reference) takes the ratio nearest to reference 1")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--guidance-scale", type=float, default=None)
@@ -41,7 +43,18 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=1, help="how many images in a row (seed increases by 1 each time)")
     parser.add_argument("--matmul", choices=MATMUL_MODES, default=None, help="matrix multiplication mode; default from the settings")
     parser.add_argument("--attention", choices=ATTENTION_KERNELS, default=None, help="attention kernel; default from the settings")
+    parser.add_argument("--init-image", type=Path, default=None, metavar="PATH", help="start from this picture (image-to-image); it is cropped to the requested size")
+    parser.add_argument("--strength", type=float, default=None, help="with --init-image: how much to change the picture, 0 < strength <= 1 (default 0.6 for image-to-image, 1.0 for inpaint; 1.0 = start from pure noise)")
+    parser.add_argument("--mask", type=Path, default=None, metavar="PATH", help="inpaint (needs --init-image): white = regenerate, black = keep; cropped like the picture")
+    parser.add_argument("--feather", type=int, default=2, help="inpaint only: soft mask edge in latent pixels, 1 = 8 image pixels (default 2; 0 = hard edge)")
+    parser.add_argument("--reference", action="append", type=Path, default=[], metavar="PATH", help="reference editing, can be given up to 2 times: 1 = the scene, 2 = a subject or person; cannot be combined with --init-image or --mask")
     args = parser.parse_args()
+    if len(args.reference) > 2:
+        parser.error(f"at most 2 --reference pictures are supported, got {len(args.reference)}")
+    if args.reference and (args.init_image or args.mask):
+        parser.error("--reference cannot be combined with --init-image or --mask")
+    if args.aspect_ratio == "auto" and not args.reference:
+        parser.error("--aspect-ratio auto needs --reference")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
@@ -54,6 +67,10 @@ def main() -> None:
         settings.attention = args.attention
     engine = Krea2Engine(settings)
     engine.load()
+    init_image = None if args.init_image is None else load_rgb(args.init_image.read_bytes())
+    mask = None if args.mask is None else load_rgb(args.mask.read_bytes())   # grayscale is taken inside mask_to_latent
+
+    references = [load_rgb(p.read_bytes()) for p in args.reference]
 
     for i in range(args.count):
         result = engine.generate(
@@ -68,8 +85,21 @@ def main() -> None:
             shift=args.shift,
             loras=[_parse_lora(v) for v in args.lora],
             enhance=args.enhance,
+            init_image=init_image,
+            strength=args.strength,
+            mask=mask,
+            feather=args.feather,
+            references=references,
         )
-        print(f"-> {result['image_path']}  ({result['width']}x{result['height']}, seed={result['seed']})")
+        if result["mode"] == "edit":
+            mode = f", edit refs={result['references']} lora_rank={result['edit_lora_rank']}"
+        elif result["mode"] == "inpaint":
+            mode = ", inpaint"
+        elif result["mode"] == "image2image":
+            mode = f", image2image strength={result['strength']}"
+        else:
+            mode = ""
+        print(f"-> {result['image_path']}  ({result['width']}x{result['height']}, seed={result['seed']}{mode})")
         if result["enhanced_prompt"]:
             print(f"   enhanced: {result['enhanced_prompt']}")
 

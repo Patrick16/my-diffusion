@@ -77,6 +77,17 @@ def resolve_dimensions(tier: str, aspect_ratio: str) -> Dimensions:
     return Dimensions(width=_round_to_block(raw_width), height=_round_to_block(raw_height))
 
 
+def nearest_aspect_ratio(width: int, height: int) -> str:
+    """The ASPECT_RATIOS entry closest to width/height (used by aspect_ratio="auto" in editing).
+
+    Closeness is measured on the logarithm of the ratio, so 2:1 and 1:2 are equally far from 1:1:
+    a plain difference of ratios would treat wide and tall pictures unequally."""
+    if width <= 0 or height <= 0:
+        raise ValueError(f"picture size must be positive, got {width}x{height}")
+    target = math.log(width / height)
+    return min(ASPECT_RATIOS, key=lambda name: abs(math.log(ASPECT_RATIOS[name]) - target))
+
+
 def all_combinations() -> dict[str, dict[str, Dimensions]]:
     """The whole tier -> format -> (w, h) table. Handy for /resolutions in the API and for logs."""
     return {

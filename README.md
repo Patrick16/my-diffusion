@@ -1,6 +1,7 @@
 # my-diffusion
 
-A thin local backend for generating images with the **Krea 2** model (text-to-image).
+A thin local backend for generating images with the **Krea 2** model: text-to-image,
+image-to-image, inpaint and editing from reference pictures.
 Its own native engine: no ComfyUI and no Wan2GP at runtime, the model runs inside our
 process. Features: frame resolution and aspect ratio, LoRA with weights, a prompt enhancer,
 all formats of quantized checkpoints, an HTTP API and a CLI.
@@ -164,6 +165,68 @@ generating: `POST /enhance-prompt`.
 }
 ```
 
+## Image-to-image, inpaint and reference editing
+
+Three more modes on top of text-to-image. The mode is chosen by which fields are in the request;
+the response has `mode` (`text2image`, `image2image`, `inpaint`, `edit`).
+
+| Mode | Request fields | CLI flags |
+|---|---|---|
+| Image-to-image | `init_image`, `strength` (default 0.6) | `--init-image`, `--strength` |
+| Inpaint | `init_image`, `mask`, `feather` (default 2), `strength` (default 1.0) | `--init-image`, `--mask`, `--feather`, `--strength` |
+| Reference editing | `references` (1 or 2 pictures) | `--reference` (repeat it), `--aspect-ratio auto` |
+
+Pictures in the API are base64 PNG or JPEG (a `data:image/...;base64,` prefix is accepted).
+
+**Image-to-image.** The picture is cropped to the requested size, encoded, mixed with noise and
+denoised from there. `strength` is how much changes: 1.0 starts from pure noise, which is the same as
+text-to-image.
+
+```bash
+uv run my-diffusion-generate "the same street at night, rain" --init-image street.png --strength 0.6
+```
+
+```json
+{"prompt": "the same street at night, rain", "init_image": "<base64>", "strength": 0.6}
+```
+
+**Inpaint.** White in the mask = regenerate, black = keep. It is not a trained inpaint model: at every
+step the kept area is blended back from the original latent. `feather` softens the mask edge, in
+latent pixels (1 latent pixel = 8 image pixels).
+
+```bash
+uv run my-diffusion-generate "a red umbrella" --init-image street.png --mask mask.png --feather 2
+```
+
+```json
+{"prompt": "a red umbrella", "init_image": "<base64>", "mask": "<base64>", "feather": 2, "strength": 1.0}
+```
+
+**Reference editing.** One or two reference pictures: 1 = the scene (it becomes the output frame),
+2 = a subject or person. Refer to them in the prompt as "image 1" and "image 2". Three parts work
+together: the LoRA `krea2_identity_edit_v1_2` (added automatically at weight 1.0 unless the request
+names it), the vision encoder of Qwen3-VL (the pictures go into the prompt) and the reference tokens
+(the pictures' latents go into the sequence). None of them works alone. `"aspect_ratio": "auto"` takes
+the ratio nearest to reference 1. In this version references cannot be combined with `init_image` or
+`mask`.
+
+```bash
+uv run my-diffusion-generate "put the person from image 2 into the scene of image 1" --reference scene.png --reference person.png --aspect-ratio auto
+```
+
+```json
+{"prompt": "put the person from image 2 into the scene of image 1", "references": ["<base64>", "<base64>"], "aspect_ratio": "auto"}
+```
+
+Needs the edit LoRA in `models/loras` and the vision weights next to the Qwen3-VL text encoder.
+
+### Memory
+
+The edit LoRA runs at rank 128 for every edit (128 vs 256 was measured as visually similar). It is
+streamed per block from pinned RAM (`MY_DIFFUSION_LORA_STREAMING`, default `true`), which costs about 5%
+per network pass. Measured on a 16 GB laptop GPU, turbo, 8 steps: an edit takes about 9 s of sampling
+at 480 (one reference) and about 20 s at 720. Two references work at 480 only; 1080 is not supported.
+
 ## Verification scripts
 
 Every stage of building the engine is verified separately - handy if something breaks after
@@ -263,7 +326,7 @@ Environment variables `MY_DIFFUSION_*` or a `.env` file (see `.env.example`).
 
 ## Not implemented yet
 
-- image-to-image, inpainting, editing from references
+- references combined with `init_image` / `mask`
 - LoKr/LoHa
 - request queue: generations run strictly one at a time
 - other Qwen models for the enhancer (Qwen3.5-4B-Abliterated, qwen3_8b): links to them

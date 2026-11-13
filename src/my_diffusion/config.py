@@ -55,7 +55,23 @@ class Settings(BaseSettings):
     # or page out to the swap file. If RAM is short, turn it off.
     pin_memory: bool = True
 
+    # LoRA streaming (as in Wan2GP): the attached LoRA pairs stay in pinned RAM, and each network block copies
+    # its own pairs to the GPU right before it runs and drops them right after (weights.streamed_adapters).
+    # The GPU then holds one block's pairs (~30 MB at rank 128) instead of the whole LoRA (0.85 GB at rank 128,
+    # 1.7 GB at 256); the price is copying the LoRA over PCIe on every pass of the network. The result is bit
+    # for bit the same. False keeps every pair on the GPU while the LoRA is attached (the old way, for comparison).
+    lora_streaming: bool = True
+
     enhancer_max_new_tokens: int = 220
+
+    # --- reference editing (engine.generate with references) ---
+    # Editing needs three parts together: this LoRA on the network, the pictures in the Qwen prompt
+    # (vision tower) and their clean latents in the network's sequence. The LoRA is added automatically
+    # with this weight unless the request names it itself (weight 0 there switches it off).
+    edit_lora: str = "krea2_identity_edit_v1_2"         # file in models/loras
+    edit_lora_weight: float = 1.0
+    vision_max_side: int = 768   # longer side of a picture before the vision tower; the encoder never goes above 768
+    max_references: int = 2      # reference 1 = the scene (the output frame), reference 2 = a subject or person
 
     # --- API ---
     host: str = "127.0.0.1"

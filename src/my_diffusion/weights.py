@@ -45,6 +45,7 @@ import json
 import logging
 import struct
 from collections.abc import Collection
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -378,9 +379,16 @@ class QLinear(nn.Module):
         self.register_buffer("block_exp", None, persistent=False)  # mxfp8: uint8, block exponents in cuBLAS order (as in the file)
         self.register_buffer("block_scale", None, persistent=False)  # q8_0: float16 (out, in/32)
         self.register_buffer("bias", None, persistent=False)
-        # LoRA: (down, up, strength) - low-rank addition; (delta, strength) - full correction to the matrix
+        # LoRA: (down, up, strength) - low-rank addition; (delta, strength) - full correction to the matrix.
+        # `adapters` is what forward multiplies with, so its tensors must be on the input's device.
+        # With LoRA streaming the pairs live in `adapters_home` (pinned RAM) instead, and `adapters` holds
+        # GPU copies only while the enclosing block runs (see streamed_adapters).
         self.adapters: list[tuple[torch.Tensor, torch.Tensor, float]] = []
+        self.adapters_home: list[tuple[torch.Tensor, torch.Tensor, float]] = []
         self.deltas: list[tuple[torch.Tensor, float]] = []
+        # Set by the model for layers inside a block that streams its adapters (Krea2Transformer marks
+        # them): only such layers may keep their pairs in RAM, because only their block moves them in.
+        self.streamable = False
 
     def set_weight(
         self, weight: torch.Tensor, fmt: str, scale: torch.Tensor | None, bias: torch.Tensor | None, full_precision: bool = False,
@@ -478,6 +486,35 @@ class QLinear(nn.Module):
     def extra_repr(self) -> str:
         mult = "native" if self.native else "exact"
         return f"in={self.in_features}, out={self.out_features}, bias={self.has_bias}, fmt={self.fmt}, matmul={mult}"
+
+
+@contextmanager
+def streamed_adapters(block: nn.Module, device: torch.device | str):
+    """Puts the streamed LoRA pairs of one block on the device for the duration of the `with` body.
+
+    What and why. With LoRA streaming (settings.lora_streaming) the finished (down, up) pairs live in pinned
+    RAM (QLinear.adapters_home), not on the GPU: a rank-128 edit LoRA is 0.85 GB, and next to the 12.6 GB
+    network it is what pushes a 720 edit to the edge of a 16 GB card. The model wraps each of its blocks in
+    this manager, so the pairs of that block's layers are copied in right before the block runs and dropped
+    right after: at most one block's pairs are on the GPU at a time. This is what Wan2GP (mmgp) does: the
+    LoRA stays unmerged in RAM and travels to the GPU together with the block that uses it.
+
+    The copies are non_blocking from pinned memory: they are queued on the current stream ahead of the
+    block's multiplications, so the GPU runs them in order and the CPU does not wait. The dropped copies
+    go back to torch's cache and are reused by the next block's copies on the same stream. The bytes are
+    the very same as with resident pairs, so the result is bit for bit the same. A block with no streamed
+    pairs costs only the walk over its layers."""
+    layers = [m for m in block.modules() if isinstance(m, QLinear) and m.adapters_home]
+    for m in layers:
+        m.adapters = [
+            (down.to(device, non_blocking=True), up.to(device, non_blocking=True), strength)
+            for down, up, strength in m.adapters_home
+        ]
+    try:
+        yield
+    finally:
+        for m in layers:
+            m.adapters = []
 
 
 def set_matmul(model: nn.Module, mode: str, device: str) -> int:
