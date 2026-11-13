@@ -207,8 +207,8 @@ uv run my-diffusion-generate "a red umbrella" --init-image street.png --mask mas
 together: the LoRA `krea2_identity_edit_v1_2` (added automatically at weight 1.0 unless the request
 names it), the vision encoder of Qwen3-VL (the pictures go into the prompt) and the reference tokens
 (the pictures' latents go into the sequence). None of them works alone. `"aspect_ratio": "auto"` takes
-the ratio nearest to reference 1. In this version references cannot be combined with `init_image` or
-`mask`.
+the exact proportions of reference 1 at the pixel budget of the resolution (see below). In this version
+references cannot be combined with `init_image` or `mask`.
 
 ```bash
 uv run my-diffusion-generate "put the person from image 2 into the scene of image 1" --reference scene.png --reference person.png --aspect-ratio auto
@@ -219,6 +219,64 @@ uv run my-diffusion-generate "put the person from image 2 into the scene of imag
 ```
 
 Needs the edit LoRA in `models/loras` and the vision weights next to the Qwen3-VL text encoder.
+
+### Reference modes (`reference_mode`)
+
+Two ways to read the references, as in Wan2GP ("KI" and "I"):
+
+- `"scene"` (default): reference 1 is the main scene, the others are people or objects.
+  `aspect_ratio: "auto"` takes the exact proportions of reference 1 at the pixel budget of `resolution`
+  (sides rounded to 16), so the scene is not cropped.
+- `"subjects"`: every reference is a person or an object, there is no scene. The size comes from
+  `resolution` + `aspect_ratio`; `"auto"` is not allowed.
+
+```bash
+uv run my-diffusion-generate "the two people at a cafe table" --reference-mode subjects --reference a.png --reference b.png --aspect-ratio 4:3
+```
+
+```json
+{"prompt": "the two people at a cafe table", "references": ["<base64>", "<base64>"], "reference_mode": "subjects", "aspect_ratio": "4:3"}
+```
+
+### Outpainting (`outpaint`)
+
+Extends reference 1 (the scene) on each side and generates the new area around it. Margins are
+percentages of reference 1's own height (top, bottom) or width (left, right). Scene mode only; the frame
+size replaces `aspect_ratio`: the frame is reference 1 plus the margins at the resolution's pixel budget.
+Reference 1 is placed at a 16-pixel token offset and the rest is generated. All zeros means off.
+
+```bash
+uv run my-diffusion-generate "the same pier, the sea and the sky continue to the right" --reference pier.png --outpaint 0 0 0 25
+```
+
+```json
+{"prompt": "the same pier, the sea and the sky continue to the right", "references": ["<base64>"], "outpaint": {"top": 0, "bottom": 0, "left": 0, "right": 25}}
+```
+
+The model may lightly redraw the original area too; it is not a pixel-exact paste. (A `keep_original`
+option is planned, not implemented.)
+
+### Background removal (`remove_background`)
+
+`"subjects"` cuts the background out of the people or objects before use (u2net, a salient-object
+model run by onnxruntime on the CPU, so the GPU stays free). In scene mode reference 1 is never cut.
+Off by default (`"none"`).
+
+```bash
+uv run my-diffusion-generate "the person from image 2 in the scene of image 1" --reference scene.png --reference person.png --remove-background
+```
+
+```json
+{"prompt": "the person from image 2 in the scene of image 1", "references": ["<base64>", "<base64>"], "remove_background": "subjects"}
+```
+
+The model file is `models/rembg/u2net.onnx`. `scripts/link_models.ps1` links it from the Wan2GP
+install (`ckpts/rembg`); on another machine put the file there or set `MY_DIFFUSION_REMBG_MODEL`.
+
+### Limits of reference editing
+
+- Two references work only at the 480 tier (`resolution: "480"`); one reference goes up to 720. 1080 is not supported.
+- A GPU check of the three features is in `scripts/check_outpaint.py` (it saves pictures to `outputs/`).
 
 ### Memory
 
