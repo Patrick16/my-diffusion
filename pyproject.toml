@@ -14,6 +14,7 @@ dependencies = [
     "sentencepiece",
     "pillow",
     "numpy",
+    "onnxruntime>=1.18",         # background removal: u2net ONNX model on the CPU (background.py)
     # --- API layer ---
     "fastapi",
     "uvicorn[standard]",

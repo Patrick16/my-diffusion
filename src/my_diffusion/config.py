@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     vision_max_side: int = 768   # longer side of a picture before the vision tower; the encoder never goes above 768
     max_references: int = 2      # reference 1 = the scene (the output frame), reference 2 = a subject or person
 
+    # --- background removal (background.py) ---
+    rembg_model: str = "rembg/u2net.onnx"               # file in models/ (u2net ONNX, run by onnxruntime on the CPU)
+
     # --- API ---
     host: str = "127.0.0.1"
     port: int = 8000
@@ -88,6 +91,10 @@ class Settings(BaseSettings):
     @property
     def text_encoder_dir(self) -> Path:
         return self.models_dir / "text_encoders" / self.text_encoder
+
+    @property
+    def rembg_model_path(self) -> Path:
+        return self.models_dir / self.rembg_model
 
     @property
     def lora_dir(self) -> Path:

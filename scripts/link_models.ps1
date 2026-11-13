@@ -28,6 +28,7 @@ $links = [ordered]@{
     "text_encoders\Qwen3-VL-4B-Instruct"   = "$ModelsHub\Wan2GP\Qwen3-VL-4B-Instruct"   # Krea 2 text encoder + enhancer by default
     "text_encoders\Qwen3_5_4B_Abliterated" = "$ModelsHub\Wan2GP\Qwen3_5_4B_Abliterated" # alternative enhancer
     "text_encoders\qwen3_8b"               = "$ModelsHub\Wan2GP\qwen3_8b"               # alternative enhancer
+    "rembg"                                = "D:\ai\Wan2GP-v1.5\ckpts\rembg"           # u2net.onnx for background removal (outside the hub, in the Wan2GP install)
 }
 
 foreach ($name in $links.Keys) {
