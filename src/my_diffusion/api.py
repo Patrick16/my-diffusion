@@ -14,6 +14,11 @@ The flow:
     POST /cancel/{id}         -> cancel: a waiting job at once, a running one at its next step
     GET  /jobs                -> your jobs (an admin sees everybody's)
 
+Settings at run time (admins only; see runtime_config.py and the bottom of this file):
+    GET   /config             -> every setting: its value, where it comes from, how a change takes effect
+    PATCH /config             -> change settings: applied at once where possible, saved to the override file
+    GET   /fs                 -> folders of the server, for choosing the model folders (allowed roots only)
+
 Access: see auth.py. A job is visible only to the client user who created it and to admins; for anyone else it
 does not exist (404, not 403, so job ids cannot be probed)."""
 
@@ -32,17 +37,18 @@ from importlib.metadata import version as package_version
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from . import imaging
+from . import imaging, runtime_config
 from .auth import AuthError, Caller, resolve_caller
-from .config import Settings
+from .config import Settings, load_settings, write_overrides
 from .engine import KIND_DEFAULTS, Krea2Engine
 from .jobs import JobNotCancellable, JobNotFound, QueueFull, Scheduler, Slot
 from .resolutions import all_combinations
 from .schemas import (
+    ConfigChange,
     EnhancePromptRequest,
     EnhancePromptResponse,
     GenerateRequest,
@@ -55,7 +61,13 @@ from .store import InputFiles, JobRecord, JobStore
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-settings = Settings()
+# The environment and .env, with the settings saved by the config API on top (config.load_settings).
+_loaded_settings = load_settings()
+# One object for the whole life of the process: the config API changes its fields in place.
+settings = _loaded_settings.settings
+_overrides: dict = dict(_loaded_settings.overrides)        # the override file's content in use
+_config_problems: list[str] = list(_loaded_settings.problems)
+_config_lock: asyncio.Lock | None = None                    # one PATCH /config at a time; created at startup
 
 
 def resolve_devices(s: Settings) -> list[str]:
@@ -134,7 +146,8 @@ async def _clean_inputs_forever(every: float = 3600.0) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global scheduler, inputs
+    global scheduler, inputs, _config_lock
+    _config_lock = asyncio.Lock()
     store = JobStore(settings.database_path)
     inputs = InputFiles(settings.inputs_dir)
     scheduler = Scheduler(
@@ -193,6 +206,7 @@ _TAGS = [
     {"name": "jobs", "description": "Queue a generation, follow it, fetch the picture, cancel it"},
     {"name": "models", "description": "Checkpoints, LoRAs and the prompt enhancer"},
     {"name": "service", "description": "Health and reference tables; no key needed"},
+    {"name": "config", "description": "Server settings at run time; admins only"},
 ]
 
 
@@ -272,6 +286,7 @@ def _errors(*codes: int) -> dict:
         403: "Admin rights are required",
         404: "No such job - or it belongs to someone else",
         409: "Conflict with the job's or the queue's state",
+        422: "The request does not validate",
         429: "The queue, or this user's share of it, is full",
         503: "The job queue or the models are not ready",
     }
@@ -414,7 +429,7 @@ async def load_checkpoint(request: LoadCheckpointRequest, caller: AdminDep) -> d
 
 @app.get("/loras", tags=["models"], responses=_errors(401))
 async def loras(caller: CallerDep) -> list[str]:
-    """LoRA files in models/loras, as names to use in a request's `loras` list."""
+    """LoRA files in the LoRA folder, as names to use in a request's `loras` list."""
     return engine.list_files("loras")
 
 
@@ -727,3 +742,181 @@ async def list_jobs(
     positions = {job.id: i for i, job in enumerate(s.order(), start=1)}
     who = owner if caller.is_admin else caller.owner
     return [_job_info(job, positions) for job in s.store.list(who, limit)]
+
+
+# ---------------------------------------------------------------------- settings at run time
+# How a change is applied (the rules themselves are in runtime_config.py and in the field metadata of config.py):
+#   1. the whole request is checked first; anything wrong is a 422 and nothing has changed;
+#   2. settings the engines read are switched on every GPU slot's own thread, under the engine's lock, so
+#      between two generations (Krea2Engine.apply_settings). A running generation keeps the settings it
+#      started with, and the call answers once the change is in effect;
+#   3. then the shared `settings` object and the scheduler's limits are updated and the override file is saved.
+# If a slot cannot apply the change, or the file cannot be written, everything is put back.
+
+# Settings only this module reads: they need no trip to the GPU threads. Purely an optimisation - a setting
+# missing here is still applied correctly, it just waits for the running generation first.
+_API_ONLY = {"queue_max_pending", "queue_max_per_user", "inputs_keep_days"}
+
+
+def _describe_config() -> dict:
+    return runtime_config.describe(settings, _overrides, _config_problems, runtime_config.read_baseline())
+
+
+def _sync_load_state(error: BaseException | None = None) -> None:
+    """After the engines were touched: bring /health's error and the scheduler in line with whether the models
+    are there. Models that failed to load at start and load now clear the error and start the queue; models
+    lost by a failed reload set it and pause the queue."""
+    global _load_error
+    if _models_loaded():
+        if _load_error is not None:
+            _load_error = None
+            if scheduler is not None:
+                scheduler.resume()
+    elif error is not None or _load_error is None:
+        _load_error = f"{type(error).__name__}: {error}" if error is not None else "the models are not loaded"
+        if scheduler is not None:
+            scheduler.pause()
+
+
+async def _switch_engines(per_slot: dict[str, Settings]) -> list:
+    """apply_settings on the thread of every slot named in per_slot, all at once; one result (the reload plan)
+    or exception per slot, in the order of `slots`."""
+    return await asyncio.gather(
+        *(_on_slot(slot, engines[slot.name].apply_settings, per_slot[slot.name]) for slot in slots if slot.name in per_slot),
+        return_exceptions=True,
+    )
+
+
+async def _change_config(change: ConfigChange, caller: Caller):
+    assert _config_lock is not None
+    async with _config_lock:
+        baseline = runtime_config.read_baseline()
+        try:
+            plan = runtime_config.plan_change(
+                settings, _overrides, change.set, change.reset, baseline.settings, runtime_config.allowed_roots(settings),
+            )
+        except runtime_config.ChangeRefused as exc:
+            return JSONResponse({"detail": f"the settings were not changed: {exc}", "errors": exc.errors}, status_code=422)
+
+        # Every engine has its own copy of the settings, with its own device.
+        before = {slot.name: engines[slot.name].settings for slot in slots}
+        after = {name: plan.running.model_copy(update={"device": old.device}) for name, old in before.items()}
+        touch_engines = bool(set(plan.applied) - _API_ONLY)
+        reload = "none"
+        if touch_engines:
+            reload = runtime_config.heaviest_reload(engines[name].reload_plan(new) for name, new in after.items())
+        # Without models no job can run, so a reload has nothing to wait for (and may be what repairs the server).
+        if reload != "none" and _models_loaded() and not _scheduler().is_idle:
+            raise HTTPException(
+                409, "this change reloads the models, and jobs are waiting or running; cancel them or wait until "
+                "the queue is empty",
+            )
+
+        def answer() -> dict:
+            return {
+                "applied": plan.applied, "restart_required": plan.restart_required, "unchanged": plan.unchanged,
+                "reloaded": reload, "warnings": plan.warnings, "dry_run": change.dry_run, "config": _describe_config(),
+            }
+
+        if change.dry_run:
+            return answer()
+
+        previous = {name: getattr(settings, name) for name in plan.applied}
+        if touch_engines:
+            results = await _switch_engines(after)
+            failures = [result for result in results if isinstance(result, BaseException)]
+            if failures:
+                # The slots that did switch go back; a slot that failed has put its old settings back itself.
+                switched = {slot.name for slot, result in zip(slots, results) if not isinstance(result, BaseException)}
+                await _switch_engines({name: before[name] for name in switched})
+                _sync_load_state(failures[0])
+                logger.warning("config change by %s could not be applied: %s", caller.owner, failures[0])
+                lost = "" if _models_loaded() else " The models are not loaded now: see /health."
+                raise HTTPException(
+                    400, f"the settings could not be applied and were left as they were: "
+                    f"{type(failures[0]).__name__}: {failures[0]}.{lost}",
+                )
+            reload = runtime_config.heaviest_reload(results)
+        try:
+            for name in plan.applied:
+                setattr(settings, name, getattr(plan.running, name))
+            if scheduler is not None:
+                scheduler.set_limits(settings.queue_max_pending, settings.queue_max_per_user)
+            write_overrides(settings.settings_file, plan.overrides)
+        except Exception as exc:
+            for name, value in previous.items():
+                setattr(settings, name, value)
+            if scheduler is not None:
+                scheduler.set_limits(settings.queue_max_pending, settings.queue_max_per_user)
+            if touch_engines:
+                await _switch_engines(before)
+                _sync_load_state()
+            logger.exception("config change by %s could not be saved", caller.owner)
+            raise HTTPException(500, f"the settings could not be saved and were left as they were: {exc}") from exc
+        _overrides.clear()
+        _overrides.update(plan.overrides)
+        if touch_engines:
+            _sync_load_state()
+        # No secret can appear here: secret settings are never changed through the API.
+        logger.info(
+            "config changed by %s: applied %s, for the next restart %s, models reloaded: %s",
+            caller.owner, {name: plan.overrides.get(name, "<reset>") for name in plan.applied},
+            {name: plan.overrides.get(name, "<reset>") for name in plan.restart_required}, reload,
+        )
+        return answer()
+
+
+_CONFIG_ERRORS = {
+    **_errors(400, 401, 403, 409),
+    422: {"description": "A value does not validate; `errors` has a message per setting. Nothing was changed"},
+}
+
+
+@app.get("/config", tags=["config"], responses=_errors(401, 403))
+async def get_config(caller: AdminDep) -> dict:
+    """Every setting of the server with what a Settings page needs. Admins only.
+
+    For each one: `value` (what the server runs with), `default`, `source` (`override` - saved through this API,
+    `env`, `dotenv` or `default`), `type` with `choices` / `minimum` / `maximum` / `nullable`, `description`,
+    `editable`, and `apply` - how a change takes effect: `live` (at once), `reload_models` (the models are read
+    again; only with an empty queue) or `restart` (saved, used from the next start; `pending_restart` tells that
+    the saved value differs from the running one). Secrets are never included: for `api_keys` only the client
+    names are given, in `access_control`."""
+    return _describe_config()
+
+
+@app.patch("/config", tags=["config"], responses=_CONFIG_ERRORS)
+async def patch_config(change: ConfigChange, caller: AdminDep):
+    """Change settings. Admins only. All or nothing: the whole request is checked first (`422` with a message per
+    setting in `errors`), and if applying fails, everything is put back (`400`).
+
+    - `live` settings take effect at once. Those the engine reads are switched between two generations: while a
+      generation runs, the call waits for it to end.
+    - `reload_models` settings reload the checkpoint or all the models on every GPU. Refused with `409` while
+      jobs are waiting or running.
+    - `restart` settings are only saved; they take effect at the next start of the server.
+
+    Changes are saved to the override file (not to `.env`) and survive a restart. `reset` removes a saved value,
+    so the setting falls back to the environment or the default. `dry_run` only checks and reports.
+
+    The answer: `applied` (in effect now), `restart_required` (saved, waiting for a restart), `unchanged`,
+    `reloaded` (`none` / `checkpoint` / `all`), `warnings`, and `config` - the same as `GET /config`."""
+    # Shielded: a client that hangs up must not stop the change half-way (the engines switched, nothing saved).
+    return await asyncio.shield(asyncio.ensure_future(_change_config(change, caller)))
+
+
+@app.get("/fs", tags=["config"], responses={**_errors(400, 401, 403), 404: {"model": ErrorDetail, "description": "No such folder"}})
+async def browse_folders(
+    caller: AdminDep,
+    path: Annotated[str | None, Query(description="Absolute path of a folder; without it the allowed roots are listed")] = None,
+) -> dict:
+    """The subfolders of a folder on the server, for choosing the model folders. Admins only.
+
+    Only folders are listed (`model_files` counts the `.safetensors` / `.gguf` files lying directly in `path`),
+    and only inside the allowed roots: the model folders in use plus `MY_DIFFUSION_FS_ROOTS`. Paths are compared
+    by their real location, so `..` and links cannot lead out of the roots (`403`). The same roots limit the
+    folders that `PATCH /config` accepts."""
+    try:
+        return await asyncio.to_thread(runtime_config.list_directory, path, runtime_config.allowed_roots(settings))
+    except runtime_config.FsError as exc:
+        raise HTTPException(exc.status, str(exc)) from None

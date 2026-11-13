@@ -5,7 +5,7 @@ separately, with GET /result/{id}/image, after the access check."""
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -138,3 +138,19 @@ class EnhancePromptResponse(BaseModel):
 
 class LoadCheckpointRequest(BaseModel):
     name: str = Field(description="File in models/checkpoints")
+
+
+class ConfigChange(BaseModel):
+    """PATCH /config: which settings to change. The names and their rules are listed by GET /config."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"set": {"matmul": "exact", "queue_max_pending": 32}, "reset": [], "dry_run": False}]},
+    )
+
+    set: dict[str, Any] = Field(default_factory=dict, description="Setting name -> its new value")
+    reset: list[str] = Field(
+        default_factory=list,
+        description="Settings whose saved value is removed: they fall back to the environment, .env or the default",
+    )
+    dry_run: bool = Field(default=False, description="Only check the change and report what it would do")

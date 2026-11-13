@@ -27,7 +27,7 @@ def test_schema_lists_the_job_flow(schema):
     for path in ("/generate", "/result/{job_id}", "/result/{job_id}/image", "/cancel/{job_id}", "/jobs"):
         assert path in schema["paths"]
     assert schema["info"]["title"] == "my-diffusion"
-    assert {tag["name"] for tag in schema["tags"]} == {"jobs", "models", "service"}
+    assert {tag["name"] for tag in schema["tags"]} == {"jobs", "models", "service", "config"}
 
 
 def test_the_key_and_the_user_id_are_security_schemes(schema):
