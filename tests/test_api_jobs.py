@@ -125,13 +125,13 @@ def test_picture_is_not_there_before_the_job_is_done(client):
     client.post(f"/cancel/{job_id}")
 
 
-def test_input_pictures_reach_the_engine_and_are_deleted_afterwards(client, tmp_path):
+def test_input_pictures_reach_the_engine_and_stay_after_the_job(client, tmp_path):
     job_id = client.post("/generate", json={"prompt": "edit", "references": [png_b64()]}).json()["job_id"]
     assert (tmp_path / "inputs" / job_id).is_dir()
     wait_for(client, job_id, lambda b: b["status"] == "done")
     assert calls[-1]["references"][0].size == (32, 24)
     assert "references" not in client.get(f"/result/{job_id}").json()["params"]   # pictures are not echoed back
-    assert not (tmp_path / "inputs" / job_id).exists()
+    assert (tmp_path / "inputs" / job_id).is_dir()   # kept for clients, see test_api_inputs
 
 
 def test_bad_request_is_400_before_queueing(client):

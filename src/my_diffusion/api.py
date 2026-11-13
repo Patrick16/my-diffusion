@@ -100,13 +100,45 @@ scheduler: Scheduler | None = None   # created at startup (lifespan)
 inputs: InputFiles | None = None
 
 
+def _job_finished(job_id: str) -> None:
+    """The scheduler's hook for a job that ended. The pictures stay for `inputs_keep_days` (see _clean_inputs)."""
+    if settings.inputs_keep_days == 0:
+        assert inputs is not None
+        inputs.remove(job_id)
+
+
+def _clean_inputs() -> int:
+    """Deletes the folders of jobs queued more than `inputs_keep_days` ago. A job that is still waiting or running
+    keeps its pictures however old it is: it needs them. Returns how many folders were deleted."""
+    if inputs is None or scheduler is None:
+        return 0
+    removed = 0
+    for job_id in inputs.folders_older_than(settings.inputs_keep_days * 86400):
+        job = scheduler.store.get(job_id)
+        if job is None or job.finished:   # no job at all: a leftover of a crash between saving and queueing
+            inputs.remove(job_id)
+            removed += 1
+    return removed
+
+
+async def _clean_inputs_forever(every: float = 3600.0) -> None:
+    while True:
+        try:
+            removed = await asyncio.to_thread(_clean_inputs)
+            if removed:
+                logger.info("deleted the input pictures of %d old job(s)", removed)
+        except Exception:  # noqa: BLE001 - housekeeping must never take the server down
+            logger.exception("cleaning old input pictures failed")
+        await asyncio.sleep(every)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global scheduler, inputs
     store = JobStore(settings.database_path)
     inputs = InputFiles(settings.inputs_dir)
     scheduler = Scheduler(
-        store, slots, _run_job, settings.queue_max_pending, settings.queue_max_per_user, on_finished=inputs.remove,
+        store, slots, _run_job, settings.queue_max_pending, settings.queue_max_per_user, on_finished=_job_finished,
     )
     # Jobs are accepted at once (they wait in the queue), but none starts before the models are loaded.
     scheduler.start(paused=True)
@@ -126,8 +158,10 @@ async def lifespan(app: FastAPI):
             scheduler.resume()
 
     task = asyncio.create_task(load())
+    cleaner = asyncio.create_task(_clean_inputs_forever())
     yield
     task.cancel()
+    cleaner.cancel()
     await scheduler.stop()
     store.close()
     scheduler = None
@@ -475,6 +509,23 @@ def _run_job(slot: Slot, job: JobRecord, cancel_event, progress) -> dict:
     )
 
 
+def _input_files(job: JobRecord) -> dict[str, str]:
+    """The public name of each stored input picture -> its file name: init, mask, ref1, ref2 ..."""
+    names = job.inputs
+    files: dict[str, str] = {}
+    if "init_image" in names:
+        files["init"] = names["init_image"]
+    if "mask" in names:
+        files["mask"] = names["mask"]
+    for i, name in enumerate(names.get("references", []), start=1):
+        files[f"ref{i}"] = name
+    return files
+
+
+def _input_urls(job: JobRecord) -> dict[str, str]:
+    return {name: f"/result/{job.id}/inputs/{name}" for name in _input_files(job)}
+
+
 def _job_info(job: JobRecord, positions: dict[str, int] | None = None) -> JobInfo:
     s = _scheduler()
     if job.status == "queued":
@@ -497,6 +548,7 @@ def _job_info(job: JobRecord, positions: dict[str, int] | None = None) -> JobInf
         params=job.params,
         result=None if job.result is None else GenerationResult(**job.result),
         image_url=f"/result/{job.id}/image" if job.status == "done" else None,
+        inputs=_input_urls(job),
         error=job.error,
     )
 
@@ -607,6 +659,29 @@ async def result_events(job_id: str, caller: CallerDep) -> StreamingResponse:
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}   # no buffering in nginx-like proxies
     return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
+
+
+_INPUT_TYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+
+
+@app.get(
+    "/result/{job_id}/inputs/{name}",
+    response_class=FileResponse,
+    tags=["jobs"],
+    responses={200: {"content": {"image/*": {}}, "description": "The picture as it was sent"}, **_errors(401, 404)},
+)
+async def result_input(job_id: str, name: str, caller: CallerDep) -> FileResponse:
+    """A picture that was sent with the job, exactly as sent: `init` (init_image), `mask`, `ref1`, `ref2`
+    (references, counted from 1). `GET /result/{id}` lists them in `inputs`. Pictures are kept for a limited time
+    after the job (MY_DIFFUSION_INPUTS_KEEP_DAYS, 7 days by default); after that, or if the job had no such picture,
+    the answer is 404."""
+    job = _visible_job(job_id, caller)
+    stored = _input_files(job).get(name)
+    assert inputs is not None
+    path = None if stored is None else inputs.path(job.id, stored)
+    if path is None or not path.is_file():
+        raise HTTPException(404, f"job {job_id} has no input picture {name!r} (it may have expired)")
+    return FileResponse(path, media_type=_INPUT_TYPES.get(path.suffix[1:], "application/octet-stream"))
 
 
 @app.get(

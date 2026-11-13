@@ -114,8 +114,8 @@ def test_unknown_schema_version_is_refused(tmp_path):
 def test_input_files_round_trip_and_cleanup(tmp_path):
     files = InputFiles(tmp_path / "inputs")
     names = files.save("abc123", {"init_image": b"one", "references": [b"two", b"three"]})
-    assert names == {"init_image": "init_image", "references": ["references_0", "references_1"]}
-    assert files.load("abc123", "references_1") == b"three"
+    assert names == {"init_image": "abc123_init.bin", "references": ["abc123_ref1.bin", "abc123_ref2.bin"]}
+    assert files.load("abc123", "abc123_ref2.bin") == b"three"
     files.remove("abc123")
     assert not (tmp_path / "inputs" / "abc123").exists()
     files.remove("abc123")   # removing twice is harmless
@@ -125,3 +125,21 @@ def test_input_files_round_trip_and_cleanup(tmp_path):
 def test_input_files_refuse_ids_that_are_not_plain(tmp_path, job_id):
     with pytest.raises(ValueError):
         InputFiles(tmp_path).save(job_id, {"mask": b"x"})
+
+
+def test_input_files_get_the_extension_of_their_format(tmp_path):
+    files = InputFiles(tmp_path)
+    names = files.save("j1", {"init_image": b"\x89PNG\r\n\x1a\n...", "mask": b"\xff\xd8\xff\xe0..", "references": [b"RIFF\0\0\0\0WEBPVP8 "]})
+    assert names == {"init_image": "j1_init.png", "mask": "j1_mask.jpg", "references": ["j1_ref1.webp"]}
+
+
+def test_input_folders_older_than(tmp_path):
+    import os
+    import time
+    files = InputFiles(tmp_path)
+    files.save("old", {"mask": b"x"})
+    files.save("new", {"mask": b"x"})
+    day = 86400
+    os.utime(tmp_path / "old", (time.time() - 8 * day,) * 2)
+    assert files.folders_older_than(7 * day) == ["old"]
+    assert InputFiles(tmp_path / "missing").folders_older_than(1) == []

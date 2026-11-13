@@ -86,8 +86,11 @@ class Settings(BaseSettings):
     devices: list[str] | Literal["auto"] | None = None
     # Jobs and their state live in SQLite, so the queue survives a restart.
     database_path: Path = PROJECT_ROOT / "data" / "jobs.sqlite3"
-    # Pictures sent with a job (init_image, mask, references) wait here until the job ends, then are deleted.
+    # Pictures sent with a job (init_image, mask, references) live here, one folder per job. They are kept after the
+    # job ends so clients can show and reuse them (GET /result/{id}/inputs/{name}), and deleted `inputs_keep_days`
+    # days after the job was queued (checked at start and every hour). 0 = delete them as soon as the job ends.
     inputs_dir: Path = PROJECT_ROOT / "data" / "inputs"
+    inputs_keep_days: float = Field(default=7.0, ge=0)
     # How many jobs may wait at once (all users together), and per user (queued + running; admins are exempt).
     queue_max_pending: int = Field(default=16, ge=1)
     queue_max_per_user: int = Field(default=3, ge=1)

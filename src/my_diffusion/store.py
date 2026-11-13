@@ -220,8 +220,24 @@ class JobStore:
         return ids
 
 
+# File extension by the first bytes of a picture, so a stored input can be served with the right content type.
+_SIGNATURES = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"))
+
+
+def _extension(data: bytes) -> str:
+    for magic, extension in _SIGNATURES:
+        if data.startswith(magic):
+            return extension
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return "bin"
+
+
 class InputFiles:
     """The pictures of a job, as the client sent them (already checked to be valid images), in inputs_dir/<job id>/.
+
+    Files are named after the job and the role of the picture: <job id>_init, <job id>_mask, <job id>_ref1,
+    <job id>_ref2 ... (references count from 1, like "image 1" in a prompt), plus the extension of the real format.
 
     Kept as compressed bytes rather than decoded pictures: a waiting job then costs disk, not RAM, and the job
     can still run after a restart. Job ids come from uuid4 (hex only), never from the client, so they are safe
@@ -239,21 +255,33 @@ class InputFiles:
         """{"init_image": b"...", "references": [b"...", b"..."]} -> the same keys with file names."""
         folder = self._folder(job_id)
         folder.mkdir(parents=True, exist_ok=False)
+        roles = {"init_image": "init", "mask": "mask"}
         names: dict[str, str | list[str]] = {}
         for field, data in pictures.items():
             if isinstance(data, list):
-                names[field] = [self._write(folder, f"{field}_{i}", item) for i, item in enumerate(data)]
+                names[field] = [self._write(folder, f"{job_id}_ref{i}", item) for i, item in enumerate(data, start=1)]
             else:
-                names[field] = self._write(folder, field, data)
+                names[field] = self._write(folder, f"{job_id}_{roles.get(field, field)}", data)
         return names
 
     @staticmethod
-    def _write(folder: Path, name: str, data: bytes) -> str:
+    def _write(folder: Path, stem: str, data: bytes) -> str:
+        name = f"{stem}.{_extension(data)}"
         (folder / name).write_bytes(data)
         return name
 
     def load(self, job_id: str, name: str) -> bytes:
-        return (self._folder(job_id) / Path(name).name).read_bytes()
+        return self.path(job_id, name).read_bytes()
+
+    def path(self, job_id: str, name: str) -> Path:
+        return self._folder(job_id) / Path(name).name
 
     def remove(self, job_id: str) -> None:
         shutil.rmtree(self._folder(job_id), ignore_errors=True)
+
+    def folders_older_than(self, seconds: float, now: float | None = None) -> list[str]:
+        """Job ids whose folder was created more than `seconds` ago (the folder is made when the job is queued)."""
+        if not self.root.is_dir():
+            return []
+        limit = (time.time() if now is None else now) - seconds
+        return [d.name for d in self.root.iterdir() if d.is_dir() and d.name.isalnum() and d.stat().st_mtime < limit]

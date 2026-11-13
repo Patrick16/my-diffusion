@@ -118,6 +118,11 @@ class JobInfo(BaseModel):
     params: dict = Field(description="The request as submitted, without the pictures")
     result: GenerationResult | None = Field(default=None, description="Set when status is done")
     image_url: str | None = Field(default=None, description="Where to fetch the PNG, when status is done")
+    inputs: dict[str, str] = Field(
+        default_factory=dict,
+        description="The pictures sent with the job, name -> URL: 'init', 'mask', 'ref1', 'ref2'. Kept for a limited "
+        "time (MY_DIFFUSION_INPUTS_KEEP_DAYS); an expired one answers 404",
+    )
     error: str | None = Field(default=None, description="Set when status is failed")
 
 

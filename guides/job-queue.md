@@ -11,6 +11,7 @@ cancelled while it waits or while it runs. Jobs are stored in SQLite, so the que
 | Submit | `POST /generate` (same body as before) | `202` with the job: `job_id`, `status`, `position` |
 | Poll | `GET /result/{job_id}` | the job: status, position, progress (`step` / `total_steps`), `result`, `image_url`, `error` |
 | Watch | `GET /result/{job_id}/events` | the same job, pushed as server-sent events (see below) |
+| Inputs | `GET /result/{job_id}/inputs/{name}` | a picture sent with the job (`init`, `mask`, `ref1`, `ref2`), for 7 days; the names are listed in `inputs` of the job |
 | Fetch | `GET /result/{job_id}/image` | the PNG, once the status is `done` (`409` before) |
 | Cancel | `POST /cancel/{job_id}` | the job; `409` if it has already finished |
 | List | `GET /jobs?limit=50` | your jobs, newest first; admins see everybody's (or `?owner=telegram:123`) |
@@ -136,11 +137,11 @@ Run the server as **one process** (`uvicorn` without `--workers`): every process
 | Path (setting) | What |
 |---|---|
 | `data/jobs.sqlite3` (`MY_DIFFUSION_DATABASE_PATH`) | the jobs: owner, times, status, request parameters, result, error |
-| `data/inputs/<job id>/` (`MY_DIFFUSION_INPUTS_DIR`) | pictures sent with a waiting job; deleted when the job ends |
+| `data/inputs/<job id>/` (`MY_DIFFUSION_INPUTS_DIR`) | pictures sent with the job, as `<job id>_init`, `_mask`, `_ref1`, `_ref2` plus the extension of the format. Kept after the job (also a failed or cancelled one) for `MY_DIFFUSION_INPUTS_KEEP_DAYS` days (default 7; `0` = delete as soon as the job ends), then deleted by an hourly clean-up. The pictures of a waiting or running job are never deleted |
 | `outputs/<job id>.png` (`MY_DIFFUSION_OUTPUT_DIR`) | finished pictures |
 
 SQLite gives full ACID transactions; the database is in WAL mode with `synchronous=FULL`, so a submitted job
-survives a power cut. Finished jobs and pictures are not deleted automatically yet.
+survives a power cut. Finished jobs and result pictures are not deleted automatically yet; input pictures expire after 7 days.
 
 ## Examples (PowerShell)
 
@@ -162,7 +163,6 @@ Without keys configured, leave out `$headers`.
 
 - No automatic clean-up of old jobs and pictures.
 - `/enhance-prompt` is not queued: it runs on the first GPU's thread between jobs.
-- No endpoint for a job's input pictures (init image, mask, references): they are deleted when the job ends. Planned: keep them and add something like `GET /result/{id}/inputs/{name}`, so clients can show and reuse them (needed by the web UI's request card).
 - No endpoint to read or change the server's configuration at run time (matmul and attention modes, devices, queue limits ...); `/health` only shows a few of them. Planned: an admin-only config endpoint saying which settings apply at once, which reload the models and which need a restart (needed by the web UI's Settings page). It should also let an admin set the checkpoints and LoRA folders (separate settings instead of one `models_dir`, with the paths checked and a server-side folder listing for the UI). The output folder stays read-only: pictures are found by name in it, so changing it would hide old ones.
 - Size limits of reference editing and outpainting: one reference goes up to the 720 tier, two only at 480, and 1080 is not supported, because the network, the edit LoRA and the reference tokens must fit into 16 GB of VRAM together (`EDIT_MAX_TIER` in `engine.py`). Planned: stop refusing these sizes and only warn that they are slower (the web UI already shows such a warning), and look for ways to optimize editing so that large sizes and two references run fast without limits (memory use of the LoRA and reference tokens, offloading, attention).
 - The scheduler lives inside the API process. Separate worker machines would need a shared database (Postgres)

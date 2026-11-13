@@ -29,6 +29,7 @@ four addresses.
 | `POST /generate` | queue a generation; answers at once (`202`) with the job id |
 | `GET /result/{job_id}` | the job: status, position in the queue, progress, result or error |
 | `GET /result/{job_id}/events` | the same job pushed as server-sent events, instead of polling ([details](job-queue.md#events-instead-of-polling)) |
+| `GET /result/{job_id}/inputs/{name}` | a picture sent with the job: `init`, `mask`, `ref1`, `ref2` (kept 7 days, see [job queue](job-queue.md#storage)) |
 | `GET /result/{job_id}/image` | the finished PNG |
 | `POST /cancel/{job_id}` | cancel a waiting or running job |
 | `GET /jobs` | your jobs (an admin sees everybody's) |
