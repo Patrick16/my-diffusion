@@ -16,6 +16,15 @@ class LoraSpec(BaseModel):
     weight: float = Field(default=1.0, ge=-4.0, le=4.0, description="Strength: 1.0 - as trained, 0 - off")
 
 
+class OutpaintMargins(BaseModel):
+    """How far to extend reference 1 on each side, in percent of its own height (top, bottom) or width (left, right)."""
+
+    top: float = Field(default=0.0, ge=0.0, le=300.0)
+    bottom: float = Field(default=0.0, ge=0.0, le=300.0)
+    left: float = Field(default=0.0, ge=0.0, le=300.0)
+    right: float = Field(default=0.0, ge=0.0, le=300.0)
+
+
 class GenerateRequest(BaseModel):
     prompt: str
     negative_prompt: str = Field(default="", description="Only works when guidance_scale != 1 (that is, on raw checkpoints)")
@@ -44,6 +53,8 @@ class GenerateRequest(BaseModel):
     # Reference editing. Cannot be combined with init_image / mask.
     references: list[str] = Field(default_factory=list, description="Base64 PNG/JPEG reference pictures. Up to config max_references")
     reference_mode: str = Field(default="scene", pattern="^(scene|subjects)$", description="'scene': reference 1 is the main scene / landscape, the others are people or objects; 'subjects': all references are people or objects (aspect_ratio 'auto' is not allowed)")
+    outpaint: OutpaintMargins | None = Field(default=None, description="Extend reference 1 by these percentages and generate the new area around it. Needs references in 'scene' mode; replaces aspect_ratio (the frame is reference 1 plus the margins at the resolution's pixel budget). All zeros = off")
+    remove_background: str = Field(default="none", pattern="^(none|subjects)$", description="'subjects': cut the background out of the people / objects before use - references 2.. in 'scene' mode, all references in 'subjects' mode")
 
 
 class GenerateResponse(BaseModel):
@@ -66,6 +77,8 @@ class GenerateResponse(BaseModel):
     feather: int | None = None
     references: int = 0
     reference_mode: str | None = None
+    outpaint: OutpaintMargins | None = Field(default=None, description="The margins actually applied; None when outpainting was off")
+    remove_background: str = Field(default="none", description="'subjects' if the background of some references was removed")
     edit_lora_rank: int | None = None
 
 

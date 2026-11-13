@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from . import imaging, sampler
+from . import background, imaging, sampler
 from .config import Settings
 from .imaging import cover_crop
 from .lora import LoraFile, apply_loras, load_lora, truncate_rank
@@ -77,6 +77,9 @@ EDIT_RANK_REDUCED = 128   # the edit LoRA is always used at this rank, see edit_
 
 # What the references are (Wan2GP's "KI" and "I"): reference 1 is the main scene, or all are people / objects.
 REFERENCE_MODES = ("scene", "subjects")
+# Background removal of references (Wan2GP's "remove_background_images_ref"): "subjects" cuts the background out of
+# the people / objects (in "scene" mode reference 1 stays untouched, it is the scene).
+REMOVE_BACKGROUND_MODES = ("none", "subjects")
 
 IMAGE_CACHE_SIZE = 8  # encodings with pictures are large (~27 MB each: ~440 tokens x 12 layers x 2560), keep fewer
 
@@ -99,6 +102,24 @@ The user's idea may be in any language; always answer in English.
 Never add captions, lettering, subtitles, watermarks or any written text to the image, and never quote the user's idea.
 The only exception: if the user explicitly asks for specific words to be written in the image, keep those words verbatim in double quotes.
 Write under 120 words. Output only the description: no preamble, no explanations, no lists."""
+
+
+def normalize_outpaint(outpaint, references: list, reference_mode: str) -> imaging.Margins | None:
+    """Validate the outpaint request and return its margins, or None when outpainting is off.
+
+    `outpaint` is None or (top, bottom, left, right) in percent of reference 1's sides. All zeros means
+    off, so a client can always send the field. Outpainting grows reference 1 (the scene), so it needs
+    references in "scene" mode. Pure: runs before any heavy work."""
+    if outpaint is None:
+        return None
+    margins = imaging.Margins(*outpaint).validate()   # ValueError for negative or non-finite margins
+    if not any(margins):
+        return None
+    if not references:
+        raise ValueError("outpaint grows reference 1, so it needs references")
+    if reference_mode != "scene":
+        raise ValueError("outpaint needs reference_mode 'scene': with 'subjects' no reference is the scene to extend")
+    return margins
 
 
 class Krea2Engine:
@@ -299,6 +320,8 @@ class Krea2Engine:
         feather: int = 2,
         references: list[Image.Image] | None = None,
         reference_mode: str = "scene",
+        outpaint: tuple[float, float, float, float] | None = None,
+        remove_background: str = "none",
     ) -> dict:
         """guidance_interval - the part of the run (as fractions of the steps) where CFG is applied;
         only matters when guidance_scale != 1. See sampler.sample.
@@ -332,6 +355,13 @@ class Krea2Engine:
         clean latents are appended to the network's sequence (see Krea2Transformer.forward); and the edit
         LoRA (settings.edit_lora) is attached, at rank 128 instead of 256 when the full rank would not fit
         the GPU (see _with_edit_lora). Each reference roughly doubles the attention's work per step.
+        outpaint - (top, bottom, left, right) in percent of reference 1's height / width (Wan2GP's outpainting
+        of an edit). Only in "scene" mode; all zeros = off. The result frame is reference 1 grown by those
+        margins at the pixel budget of `resolution` (imaging.outpaint_frame; it replaces aspect_ratio). Reference
+        1 is not cropped: it is resized to its place in the frame and given to the network at that token
+        offset, and the rest of the frame is generated around it.
+        remove_background - "subjects": cut the background (u2net, on the CPU) out of the people / objects before
+        they are used: references 2.. in "scene" mode, all references in "subjects" mode; "none" - leave as is.
         Not combinable with init_image or mask."""
         if not self.loaded:
             raise RuntimeError("the engine is not loaded yet")
@@ -339,16 +369,21 @@ class Krea2Engine:
             return self._generate(
                 prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
                 tuple(guidance_interval), init_image, strength, mask, feather, list(references or []), reference_mode,
+                outpaint, remove_background,
             )
 
     def _generate(
         self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval,
         init_image=None, strength=None, mask=None, feather=2, references=None, reference_mode="scene",
+        outpaint=None, remove_background="none",
     ) -> dict:
         s = self.settings
         if reference_mode not in REFERENCE_MODES:
             raise ValueError(f"reference_mode must be one of {list(REFERENCE_MODES)}, got {reference_mode!r}")
+        if remove_background not in REMOVE_BACKGROUND_MODES:
+            raise ValueError(f"remove_background must be one of {list(REMOVE_BACKGROUND_MODES)}, got {remove_background!r}")
         references = list(references or [])
+        margins = normalize_outpaint(outpaint, references, reference_mode)
         if len(references) > s.max_references:
             raise ValueError(f"at most {s.max_references} reference pictures are supported, got {len(references)}")
         if references and (init_image is not None or mask is not None):
@@ -359,12 +394,24 @@ class Krea2Engine:
                 raise ValueError("aspect_ratio 'auto' takes the proportions of reference 1, so it needs references")
             if reference_mode != "scene":
                 raise ValueError("aspect_ratio 'auto' needs reference_mode 'scene': with 'subjects' no picture is the scene to take the size from")
+        # Which references lose their background: the people / objects, never the scene.
+        first_subject = 1 if reference_mode == "scene" else 0
+        cut_background = remove_background == "subjects" and len(references) > first_subject
+        if cut_background and not background.model_path().is_file():
+            raise FileNotFoundError(   # before the heavy work, not in the middle of the preparation
+                f"Background removal model not found: {background.model_path()}. Put u2net.onnx there "
+                "(scripts/link_models.ps1 links it from the Wan2GP folder) or set MY_DIFFUSION_REMBG_MODEL."
+            )
         defaults = (EDIT_DEFAULTS if references else KIND_DEFAULTS)[self.kind]
         steps = steps or defaults["steps"]
         guidance_scale = defaults["guidance_scale"] if guidance_scale is None else guidance_scale
         sampler.guided_steps(steps, guidance_interval)   # validate now: a bad interval surfaces before the heavy work
         seed = random.randint(0, MAX_SEED) if seed is None else seed
-        if auto_size:
+        src_box = None
+        if margins is not None:
+            # The frame is the scene grown by the margins; reference 1 goes into src_box inside it.
+            width, height, src_box = imaging.outpaint_frame(*references[0].size, margins, resolution)
+        elif auto_size:
             width, height = resolve_dimensions_from_size(resolution, *references[0].size)
         else:
             width, height = resolve_dimensions(resolution, aspect_ratio)
@@ -389,11 +436,23 @@ class Krea2Engine:
         # Editing: the reference frames, prepared on the CPU now (cheap). In "scene" mode reference 1 gets
         # the output frame itself; the others (all of them in "subjects" mode) keep their proportions and sit centred in the frame, at an
         # offset in tokens. Every side is a multiple of 16, so each latent cuts into whole 2x2 patches.
+        if cut_background:
+            t0 = time.time()
+            references = [
+                background.remove_background(ref) if k >= first_subject else ref for k, ref in enumerate(references)
+            ]
+            logger.info("background removed from %d reference(s): %.1fs", len(references) - first_subject, time.time() - t0)
         frames: list[Image.Image] = []
         offsets: list[tuple[int, int]] = []
         for k, ref in enumerate(references):
             if k == 0 and reference_mode == "scene":
-                frame, offset = cover_crop(ref.convert("RGB"), width, height), (0, 0)
+                if src_box is None:
+                    frame, offset = cover_crop(ref.convert("RGB"), width, height), (0, 0)
+                else:
+                    # Outpaint: the scene keeps all its pixels, just resized to its box; the margins are generated.
+                    box_left, box_top, box_w, box_h = src_box
+                    frame = ref.convert("RGB").resize((box_w, box_h), Image.LANCZOS)
+                    offset = (box_top // imaging.PATCH_PIXELS, box_left // imaging.PATCH_PIXELS)
             else:
                 frame, offset = imaging.fit_reference(ref, width, height)
             frames.append(frame)
@@ -533,6 +592,8 @@ class Krea2Engine:
             "feather": None if mask is None else feather,
             "references": len(references),
             "reference_mode": reference_mode if references else None,
+            "outpaint": None if margins is None else dict(margins._asdict()),
+            "remove_background": remove_background if cut_background else "none",
             "edit_lora_rank": edit_rank,   # None without editing or with the edit LoRA switched off
             "timings": {k: round(v, 2) for k, v in timings.items()},
         }

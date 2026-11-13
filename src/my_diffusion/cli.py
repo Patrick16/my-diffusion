@@ -49,7 +49,16 @@ def main() -> None:
     parser.add_argument("--feather", type=int, default=2, help="inpaint only: soft mask edge in latent pixels, 1 = 8 image pixels (default 2; 0 = hard edge)")
     parser.add_argument("--reference", action="append", type=Path, default=[], metavar="PATH", help="reference editing, can be given up to 2 times: 1 = the scene, 2 = a subject or person; cannot be combined with --init-image or --mask")
     parser.add_argument("--reference-mode", choices=["scene", "subjects"], default="scene", help="'scene': --reference 1 is the main scene, the rest are people / objects; 'subjects': all references are people / objects")
+    parser.add_argument("--outpaint", nargs=4, type=float, default=None, metavar=("TOP", "BOTTOM", "LEFT", "RIGHT"), help="extend reference 1 by these percentages of its sides and generate the new area (needs --reference, scene mode; replaces --aspect-ratio)")
+    parser.add_argument("--remove-background", action="store_true", help="cut the background out of the people / objects: references 2.. in scene mode, all in subjects mode")
     args = parser.parse_args()
+    if args.outpaint is not None and any(args.outpaint):
+        if not args.reference:
+            parser.error("--outpaint needs --reference")
+        if args.reference_mode != "scene":
+            parser.error("--outpaint needs --reference-mode scene")
+        if any(v < 0 for v in args.outpaint):
+            parser.error("--outpaint margins must not be negative")
     if args.aspect_ratio == "auto" and args.reference_mode != "scene":
         parser.error("--aspect-ratio auto needs --reference-mode scene")
     if len(args.reference) > 2:
@@ -94,6 +103,8 @@ def main() -> None:
             feather=args.feather,
             references=references,
             reference_mode=args.reference_mode,
+            outpaint=None if args.outpaint is None else tuple(args.outpaint),
+            remove_background="subjects" if args.remove_background else "none",
         )
         if result["mode"] == "edit":
             mode = f", edit refs={result['references']} lora_rank={result['edit_lora_rank']}"
