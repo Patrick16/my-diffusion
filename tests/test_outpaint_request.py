@@ -10,7 +10,6 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-import my_diffusion.background as bg
 from my_diffusion.engine import Krea2Engine, normalize_outpaint
 from my_diffusion.config import Settings
 from my_diffusion.imaging import Margins
@@ -80,10 +79,12 @@ def test_engine_bad_remove_background(engine):
         _call(engine, references=[PIC], remove_background="all")
 
 
-def test_engine_missing_background_model(engine, tmp_path, monkeypatch):
-    monkeypatch.setattr(bg, "model_path", lambda: tmp_path / "nope.onnx")
-    with pytest.raises(FileNotFoundError, match="u2net"):
+def test_engine_missing_background_model(tmp_path):
+    # The check uses the engine's own settings (models_dir given in code), not a fresh Settings() from the environment.
+    engine = Krea2Engine(Settings(models_dir=tmp_path))
+    with pytest.raises(FileNotFoundError, match="u2net") as err:
         _call(engine, references=[PIC, PIC], remove_background="subjects")
+    assert str(tmp_path) in str(err.value)
 
 
 # ---- schema -----------------------------------------------------------------------------------------------------

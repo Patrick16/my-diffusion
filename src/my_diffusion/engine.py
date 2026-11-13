@@ -397,9 +397,12 @@ class Krea2Engine:
         # Which references lose their background: the people / objects, never the scene.
         first_subject = 1 if reference_mode == "scene" else 0
         cut_background = remove_background == "subjects" and len(references) > first_subject
-        if cut_background and not background.model_path().is_file():
+        # The engine's own settings, not background.model_path(): that one reads a fresh Settings() from the
+        # environment and would miss a models_dir given to this engine in code.
+        rembg_path = s.rembg_model_path
+        if cut_background and not rembg_path.is_file():
             raise FileNotFoundError(   # before the heavy work, not in the middle of the preparation
-                f"Background removal model not found: {background.model_path()}. Put u2net.onnx there "
+                f"Background removal model not found: {rembg_path}. Put u2net.onnx there "
                 "(scripts/link_models.ps1 links it from the Wan2GP folder) or set MY_DIFFUSION_REMBG_MODEL."
             )
         defaults = (EDIT_DEFAULTS if references else KIND_DEFAULTS)[self.kind]
@@ -439,7 +442,8 @@ class Krea2Engine:
         if cut_background:
             t0 = time.time()
             references = [
-                background.remove_background(ref) if k >= first_subject else ref for k, ref in enumerate(references)
+                background.remove_background(ref, path=rembg_path) if k >= first_subject else ref
+                for k, ref in enumerate(references)
             ]
             logger.info("background removed from %d reference(s): %.1fs", len(references) - first_subject, time.time() - t0)
         frames: list[Image.Image] = []
