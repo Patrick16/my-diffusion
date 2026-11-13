@@ -1,30 +1,62 @@
 # my-diffusion
 
-A thin local backend for generating images with the **Krea 2** model: text-to-image,
-image-to-image, inpaint and editing from reference pictures.
-Its own native engine: no ComfyUI and no Wan2GP at runtime, the model runs inside our
-process. Features: frame resolution and aspect ratio, LoRA with weights, a prompt enhancer,
-all formats of quantized checkpoints, an HTTP API and a CLI.
+A thin local backend for generating images with the **Krea 2** model. It runs its own native
+engine in one process: no ComfyUI and no Wan2GP at runtime. It is exposed as an HTTP API and as a
+command line.
 
-## Quick start
+## Features
+
+- **Text-to-image** with frame resolution (480 / 720 / 1080) and aspect ratio
+- **Image-to-image** and **inpaint** with a mask
+- **Reference editing**: one or two reference pictures, scene or subjects mode
+- **Outpainting**: extend a picture on any side, optionally keeping the original pixels
+- **Background removal** for reference people and objects
+- **LoRA** with per-request weights; the set can change without reloading the model
+- **Prompt enhancer**: Qwen3-VL expands a short idea into a detailed prompt
+- **Checkpoints** in mxfp8, fp8, int8, and GGUF q8_0 formats; switch them without a restart
+- **Fast inference** on NVIDIA GPUs: quantized matrix multiplication, pinned memory, cuDNN attention
+- **HTTP API** with interactive docs at `/docs`, and a **CLI**
+
+## Requirements
+
+- Windows (the model-linking script is PowerShell; tested on Windows 11)
+- Python 3.11 or 3.12
+- [uv](https://docs.astral.sh/uv/)
+- NVIDIA GPU with CUDA. Tested on an RTX 5080 Laptop with 16 GB VRAM (peak use about 14 GB at 1080p).
+  The fast multiplication modes need a 50-series (Blackwell) GPU; other cards use `exact` mode.
+- About 64 GB of RAM was used for testing. Pinned memory keeps about 19 GB of RAM in use; it can be
+  turned off (see [configuration](guides/configuration.md)).
+- Model files (see [Models](#models)); the checkpoint alone is about 13 GB.
+
+## Installation
+
+Clone the repository and install the dependencies (torch is taken from the PyTorch CUDA 12.8 index):
 
 ```bash
 uv sync
 ```
 
+Link the models into the project (see [Models](#models)):
+
 ```bash
 pwsh scripts/link_models.ps1
 ```
+
+## Running
+
+Generate an image from the command line:
 
 ```bash
 uv run my-diffusion-generate "a fox in the snow, golden hour" --resolution 720 --aspect-ratio 16:9
 ```
 
-HTTP server (endpoint documentation at http://127.0.0.1:8000/docs):
+Start the HTTP server (interactive documentation at http://127.0.0.1:8000/docs):
 
 ```bash
 uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000
 ```
+
+Optional settings go into a `.env` file: copy `.env.example` to `.env` and edit it.
 
 ## Models
 
@@ -39,352 +71,36 @@ parameter) or simply put the files into the same structure.
 | `models/loras/` | LoRAs for Krea 2, subfolders allowed |
 | `models/vae/` | `qwen_vae.safetensors` and `qwen_vae_config.json` |
 | `models/text_encoders/Qwen3-VL-4B-Instruct/` | `*_quanto_bf16_int8.safetensors`, `config.json`, tokenizer files |
+| `models/rembg/` | `u2net.onnx` (only for background removal) |
 
-## How it works
+Reference editing also needs the edit LoRA `krea2_identity_edit_v1_2` in `models/loras`.
 
-The path of one request: text -> Qwen -> noise -> network x N steps -> VAE -> PNG.
-Every module starts with an explanation of what it does and why.
+## Supported
 
-| File | Role |
+| Area | Support |
 |---|---|
-| `text_encoder.py` | Qwen3-VL-4B. Turns the prompt into hidden states of 12 layers (this is what Krea 2 "reads"). It is also the prompt enhancer. |
-| `transformer.py` | The Krea 2 network itself: 28 blocks, text and image in one sequence. A port from ComfyUI. |
-| `weights.py` | Reading checkpoints and the `QLinear` layer: the weights stay on the GPU in compressed form (1 byte per number) and are unpacked for the duration of a single multiplication. |
-| `sampler.py` | The noise schedule and Euler steps: from noise to latent. |
-| `vae.py` | Latent -> pixels. The only thing taken from `diffusers`. |
-| `lora.py` | Parsing LoRA files (7 key naming schemes) and attaching them to the layers. |
-| `memory.py` | One large model on the GPU at a time; switching without unnecessary copies. |
-| `pinned.py` | Pinned RAM: the weights move from it to the GPU in fractions of a second. |
-| `engine.py` | Combines everything into `generate()`. Text cache, LoRA cache, timing measurements. |
-| `resolutions.py` | Resolution + aspect ratio -> width and height. |
-| `api.py`, `schemas.py`, `cli.py` | HTTP and the command line on top of the engine. |
-
-### Why earlier attempts produced noise
-
-Before this engine, we tried `diffusers.Krea2Pipeline` and a port of the network from ComfyUI -
-both produced noise. The network itself is not complicated; it is easy to get something wrong around it. What has to be
-done right (and what is now verified by scripts):
-
-1. **Weight format.** `krea2_turbo_mxfp8` is not an ordinary fp8: every 32 numbers have their own multiplier
-   2^(e-127), and the table of exponents is also rearranged in 128x4 tiles. Our unpacking is checked
-   bit for bit against the ComfyUI library (`scripts/check_weights.py`).
-2. **The schedule shift** sits in the exponent: `mu=1.15` is a shift by a factor of 3.16.
-3. **The noise level** is fed to the network as a number 0..1, not 0..1000.
-4. **Latent normalization** per channel before the VAE: `z = latent * std + mean`.
-5. **Text**: 12 layers of Qwen (`hidden_states[2,5,...,35]`); the 34-token service prefix
-   is cut off after the forward pass, not before.
-
-## Resolutions and formats
-
-The resolution sets a **pixel budget** - the area of a 16:9 frame at that height. The other formats
-get the same area, so the time and memory are the same for all formats of one
-resolution. The sides are multiples of 16.
-
-| | 480 | 720 | 1080 |
-|---|---|---|---|
-| 16:9 | 848x480 | 1280x720 | 1920x1088 |
-| 4:3 | 736x560 | 1104x832 | 1664x1248 |
-| 3:2 | 784x528 | 1168x784 | 1760x1168 |
-| 21:9 | 976x416 | 1472x624 | 2192x944 |
-| 1:1 | 640x640 | 960x960 | 1440x1440 |
-
-Portrait formats (9:16, 3:4, 2:3, 9:21) use the same numbers with the sides swapped.
-To check the table: `uv run python -m my_diffusion.resolutions`.
-
-## Checkpoints
-
-All formats found in `models/checkpoints` are supported:
-
-| Format | How it is stored | Example |
-|---|---|---|
-| `mxfp8` | fp8 + a 2^e multiplier per block of 32 numbers | `krea2_turbo_mxfp8.safetensors` |
-| `float8_e4m3fn` | fp8 + one multiplier per layer | `finepornV4INT8NVFP4BF16_v4.safetensors` |
-| `int8_tensorwise` | int8 + a multiplier per row | `intorealismKrea2_v20.safetensors` |
-| bare fp8 | fp8 without multipliers | `dafK2T_v1.safetensors` |
-| `q8_0` (GGUF) | int8 + a float16 multiplier per block of 32 numbers | `Wild_Krea-2-turbo_NSFW-Q8_0.gguf` |
-
-The loader is strict: an unknown format or an "extra" tensor is an error, not silent garbage.
-
-**Turbo or raw.** The kind of checkpoint cannot be determined from the weights, and the settings depend on it:
-turbo - 8 steps without CFG, raw - 28 steps and CFG 4.5. By default the kind is taken from the file name
-(`raw` in the name -> raw, otherwise turbo); it can be overridden with the `MY_DIFFUSION_CHECKPOINT_KIND`
-variable or with the `steps` / `guidance_scale` parameters in the request.
-
-`guidance_scale` here is the usual CFG, where 1.0 means "off". In Wan2GP the scale is shifted
-by one: their `guidance 3.5` is our `4.5`.
-
-**Guidance interval.** CFG calls the network twice per step. `guidance_start` / `guidance_end`
-(fractions of the steps, default `0` / `1`) limit CFG to a part of the run; steps outside it call
-the network once. `"guidance_end": 0.6` on 28 steps applies CFG to the first 17 steps and cuts
-sampling by about 20% (measured: 20.9 s -> 16.9 s at 480). It changes the image, so it is off by
-default, and it only matters when `guidance_scale` is not 1 - that is, on raw checkpoints.
-Not validated for image quality: there was no raw checkpoint to test it on, only the timing and
-the mechanics were checked (with CFG forced on a turbo checkpoint).
-
-## LoRA
-
-```json
-"loras": [{"name": "KreaAmateur_V2", "weight": 0.8}, {"name": "sliders/zoom_krea2_loraholic", "weight": -1.0}]
-```
-
-`name` is the path relative to `models/loras`; the extension can be omitted. `weight` is the strength:
-1.0 as trained, a negative value reverses the effect. The LoRA set and its weights can be changed between
-requests without reloading the model: a LoRA does not get merged into the weights, it is computed alongside
-as a small addition.
-
-To check which files are read: `uv run python scripts/check_loras.py`.
-Not supported: LoKr/LoHa and ControlNet-like files (the loader says so directly).
-
-## Prompt enhancer
-
-`"enhance_prompt": true` in the request or `--enhance` in the CLI: Qwen3-VL expands a short
-idea into a detailed description in English, and the generation then runs on that description. It is the same model
-that serves as the text encoder, so it takes no extra memory. Separately, without
-generating: `POST /enhance-prompt`.
-
-## API
-
-| Endpoint | What it does |
-|---|---|
-| `GET /health` | `loading` / `ok` / `error`, the current checkpoint |
-| `POST /generate` | generation; the response is the path to a PNG, the parameters and timings |
-| `GET /outputs/<file>` | fetch a finished image |
-| `POST /enhance-prompt` | only rewrite the prompt |
-| `GET /resolutions` | table of sizes |
-| `GET /checkpoints`, `POST /checkpoints/load` | list and switch the checkpoint without a restart |
-| `GET /loras` | list of LoRAs |
-
-```json
-{
-  "prompt": "a fox in the snow, golden hour",
-  "resolution": "720",
-  "aspect_ratio": "16:9",
-  "seed": 42,
-  "loras": [{"name": "KreaAmateur_V2", "weight": 0.8}],
-  "enhance_prompt": false
-}
-```
-
-## Image-to-image, inpaint and reference editing
-
-Three more modes on top of text-to-image. The mode is chosen by which fields are in the request;
-the response has `mode` (`text2image`, `image2image`, `inpaint`, `edit`).
-
-| Mode | Request fields | CLI flags |
-|---|---|---|
-| Image-to-image | `init_image`, `strength` (default 0.6) | `--init-image`, `--strength` |
-| Inpaint | `init_image`, `mask`, `feather` (default 2), `strength` (default 1.0) | `--init-image`, `--mask`, `--feather`, `--strength` |
-| Reference editing | `references` (1 or 2 pictures) | `--reference` (repeat it), `--aspect-ratio auto` |
-
-Pictures in the API are base64 PNG or JPEG (a `data:image/...;base64,` prefix is accepted).
-
-**Image-to-image.** The picture is cropped to the requested size, encoded, mixed with noise and
-denoised from there. `strength` is how much changes: 1.0 starts from pure noise, which is the same as
-text-to-image.
-
-```bash
-uv run my-diffusion-generate "the same street at night, rain" --init-image street.png --strength 0.6
-```
-
-```json
-{"prompt": "the same street at night, rain", "init_image": "<base64>", "strength": 0.6}
-```
-
-**Inpaint.** White in the mask = regenerate, black = keep. It is not a trained inpaint model: at every
-step the kept area is blended back from the original latent. `feather` softens the mask edge, in
-latent pixels (1 latent pixel = 8 image pixels).
-
-```bash
-uv run my-diffusion-generate "a red umbrella" --init-image street.png --mask mask.png --feather 2
-```
-
-```json
-{"prompt": "a red umbrella", "init_image": "<base64>", "mask": "<base64>", "feather": 2, "strength": 1.0}
-```
-
-**Reference editing.** One or two reference pictures: 1 = the scene (it becomes the output frame),
-2 = a subject or person. Refer to them in the prompt as "image 1" and "image 2". Three parts work
-together: the LoRA `krea2_identity_edit_v1_2` (added automatically at weight 1.0 unless the request
-names it), the vision encoder of Qwen3-VL (the pictures go into the prompt) and the reference tokens
-(the pictures' latents go into the sequence). None of them works alone. `"aspect_ratio": "auto"` takes
-the exact proportions of reference 1 at the pixel budget of the resolution (see below). In this version
-references cannot be combined with `init_image` or `mask`.
-
-```bash
-uv run my-diffusion-generate "put the person from image 2 into the scene of image 1" --reference scene.png --reference person.png --aspect-ratio auto
-```
-
-```json
-{"prompt": "put the person from image 2 into the scene of image 1", "references": ["<base64>", "<base64>"], "aspect_ratio": "auto"}
-```
-
-Needs the edit LoRA in `models/loras` and the vision weights next to the Qwen3-VL text encoder.
-
-### Reference modes (`reference_mode`)
-
-Two ways to read the references, as in Wan2GP ("KI" and "I"):
-
-- `"scene"` (default): reference 1 is the main scene, the others are people or objects.
-  `aspect_ratio: "auto"` takes the exact proportions of reference 1 at the pixel budget of `resolution`
-  (sides rounded to 16), so the scene is not cropped.
-- `"subjects"`: every reference is a person or an object, there is no scene. The size comes from
-  `resolution` + `aspect_ratio`; `"auto"` is not allowed.
-
-```bash
-uv run my-diffusion-generate "the two people at a cafe table" --reference-mode subjects --reference a.png --reference b.png --aspect-ratio 4:3
-```
-
-```json
-{"prompt": "the two people at a cafe table", "references": ["<base64>", "<base64>"], "reference_mode": "subjects", "aspect_ratio": "4:3"}
-```
-
-### Outpainting (`outpaint`)
-
-Extends reference 1 (the scene) on each side and generates the new area around it. Margins are
-percentages of reference 1's own height (top, bottom) or width (left, right). Scene mode only; the frame
-size replaces `aspect_ratio`: the frame is reference 1 plus the margins at the resolution's pixel budget.
-Reference 1 is placed at a 16-pixel token offset and the rest is generated. All zeros means off.
-
-```bash
-uv run my-diffusion-generate "the same pier, the sea and the sky continue to the right" --reference pier.png --outpaint 0 0 0 25
-```
-
-```json
-{"prompt": "the same pier, the sea and the sky continue to the right", "references": ["<base64>"], "outpaint": {"top": 0, "bottom": 0, "left": 0, "right": 25}}
-```
-
-By default the model may lightly redraw the original area too. Add `"keep_original": true` (CLI: `--keep-original`) to keep it: after every step the original is put back, as in inpaint, so only the margins are generated (the area stays within about 1-2/255 of the source, the VAE round-trip floor; a 16 px band along inner edges is blended to hide the seam). With two references the second one then only fits into the margins.
-
-### Background removal (`remove_background`)
-
-`"subjects"` cuts the background out of the people or objects before use (u2net, a salient-object
-model run by onnxruntime on the CPU, so the GPU stays free). In scene mode reference 1 is never cut.
-Off by default (`"none"`).
-
-```bash
-uv run my-diffusion-generate "the person from image 2 in the scene of image 1" --reference scene.png --reference person.png --remove-background
-```
-
-```json
-{"prompt": "the person from image 2 in the scene of image 1", "references": ["<base64>", "<base64>"], "remove_background": "subjects"}
-```
-
-The model file is `models/rembg/u2net.onnx`. `scripts/link_models.ps1` links it from the Wan2GP
-install (`ckpts/rembg`); on another machine put the file there or set `MY_DIFFUSION_REMBG_MODEL`.
-
-### Limits of reference editing
-
-- Two references work only at the 480 tier (`resolution: "480"`); one reference goes up to 720. 1080 is not supported.
-- A GPU check of the three features is in `scripts/check_outpaint.py` (it saves pictures to `outputs/`).
-
-### Memory
-
-The edit LoRA runs at rank 128 for every edit (128 vs 256 was measured as visually similar). It is
-streamed per block from pinned RAM (`MY_DIFFUSION_LORA_STREAMING`, default `true`), which costs about 5%
-per network pass. Measured on a 16 GB laptop GPU, turbo, 8 steps: an edit takes about 9 s of sampling
-at 480 (one reference) and about 20 s at 720. Two references work at 480 only; 1080 is not supported.
-
-## Verification scripts
-
-Every stage of building the engine is verified separately - handy if something breaks after
-updating the libraries or on another machine.
-
-| Script | What it confirms |
-|---|---|
-| `scripts/check_weights.py` | the checkpoint loads into the model in strict mode |
-| `scripts/check_text_encoder.py` | Qwen is loaded correctly: it encodes the prompt and writes coherent text |
-| `scripts/smoke_test.py` | the whole path "by hand", linearly, without the engine |
-| `scripts/check_loras.py` | which LoRAs are read, which are not, and why |
-| `scripts/check_checkpoints.py` | every checkpoint produces an image |
-| `scripts/profile_step.py` | where the step time goes; with `--real` - a comparison of the multiplication modes on the real checkpoint |
-| `scripts/compare_checkpoints.py` | how the checkpoints differ from the base one layer by layer, and whether the difference is low-rank |
-
-## Measurements (RTX 5080 Laptop 16 GB, 64 GB RAM, turbo, 8 steps)
-
-| Resolution | Sampling | VAE | Peak VRAM |
-|---|---|---|---|
-| 480 (736x560) | ~7 s | ~1 s | - |
-| 720 (1280x720) | ~15 s | ~1.5 s | 13.3 GB |
-| 1080 (1920x1088) | ~38 s | ~1 s (bf16) | 13.8 GB |
-
-The table above is the initial state of the engine (exact multiplication, ordinary memory, the default
-attention kernel). After three optimizations - fast multiplication, pinned memory and a fast attention
-kernel, described below - a whole request takes:
-
-| Resolution | New prompt | Same prompt, different seed | Of which sampling |
-|---|---|---|---|
-| 480 (736x560) | 4.9 s | 3.9 s | 2.8 s |
-| 720 (1280x720) | 9.9 s | 8.9 s | 7.2 s |
-| 1080 (1920x1088) | ~23 s | 22.2 s | 19.8 s |
-
-For comparison: a repeated request at 720 used to take about 20 s.
-The first load of a checkpoint depends on the disk: 12.6 GB are read sequentially.
-
-### Pinned memory (`MY_DIFFUSION_PIN_MEMORY`)
-
-One large model lives on the GPU at a time, so every request moves the models between
-RAM and the GPU. From ordinary RAM this is ~4 GB/s (the network takes about 3 s), from
-pinned memory - 26-36 GB/s (about 0.5 s). That is why the weights of all three models live
-in pinned memory. The cost: about 19 GB of RAM that the system cannot give to other programs
-or page out to swap. If RAM is short - `MY_DIFFUSION_PIN_MEMORY=false`.
-
-### Attention kernel (`MY_DIFFUSION_ATTENTION`)
-
-torch computes attention with one of several ready-made "kernels". By default on Windows torch uses the
-`efficient` kernel (FlashAttention is not included in the Windows build). The same build has a kernel from
-NVIDIA's cuDNN library - it is 2-2.4 times faster, and we put it first (`cudnn`):
-
-| Kernel | Sampling 480 / 720 / 1080 (`fp8_all` mode) |
-|---|---|
-| `default` | 3.0 / 8.3 / 26.3 s |
-| `cudnn` (default) | 2.8 / 7.2 / 19.8 s |
-
-The accuracy of the kernels is the same; they differ from each other only at the rounding level (in the `exact` mode
-the pictures differ by 41-44 dB PSNR - not visible to the eye). A peculiarity of `cudnn`: for each new
-sequence length (a new resolution or a prompt of a different length) it is prepared once, taking
-0.2-0.4 s. To compare with ComfyUI, set `MY_DIFFUSION_ATTENTION=default`.
-
-### Multiplication mode (`MY_DIFFUSION_MATMUL`)
-
-Exact mode (`exact`): the compressed weights of each layer are unpacked into bf16 and multiplied as usual. NVIDIA 50-series
-GPUs can multiply mxfp8 matrices directly in compressed form - these are the `fp8` and `fp8_all` modes. `fp8_all` is enabled by default:
-
-| Mode | Sampling 480 / 720 / 1080 | What changes |
-|---|---|---|
-| `exact` | ~7 / 15.6 / 39.1 s | the result matches ComfyUI bit for bit |
-| `fp8` | 5.0 / 11.3 / 32.8 s | the input of 160 of the 256 layers is rounded to fp8; the other 96 are computed exactly, as the checkpoint author asks (ComfyUI does the same) |
-| `fp8_all` (default) | 3.1 / 9.1 / 26.0 s | the same for all 256 layers; the picture is of the same quality, but differs from `exact` in details |
-
-The larger the picture, the smaller the gain: at 1080p a third of the step is attention, which this
-mode does not speed up. Fast modes work only with mxfp8 checkpoints (other formats
-are computed as `exact`) and only on NVIDIA 50-series GPUs - on another card set
-`MY_DIFFUSION_MATMUL=exact`. The peak VRAM is the same. To compare the modes on your own prompt: `uv run python scripts/profile_step.py --real` -
-the pictures are saved side by side in `outputs/ab_*.png`.
-
-## Configuration
-
-Environment variables `MY_DIFFUSION_*` or a `.env` file (see `.env.example`).
-
-## Tried and rejected
-
-- **Skipping steps with a cache** (reusing the deep blocks' contribution from the previous step when
-  the first block's output changed little, as in first-block cache / TeaCache). Measured on the turbo
-  checkpoint: at 8 steps there is nothing to reuse (the reused part is 23-40% off), and at 28 steps a
-  cached run stays numerically closer to the full run than a plain run with the same number of
-  network passes, but the image is visibly broken by a noisy mosaic texture, while plain 8-10 steps
-  give a clean image. Use fewer `steps` instead.
-- **Storing a checkpoint as "base + low-rank correction"** (to switch checkpoints in seconds instead
-  of reading another 13 GB). Measured with `scripts/compare_checkpoints.py` on five Krea 2 turbo
-  checkpoints: the difference from the base one is mostly spread over the whole matrix, not low-rank.
-  Even 1024 of 6144 singular directions leave 1.5-5% of the weights unexplained, while rounding into
-  an 8-bit format alone accounts for 0.6-3%. One checkpoint is the base within rounding, one has a
-  strong low-rank part plus a spread remainder, two have no low-rank part at all. The minutes come
-  from the cold disk, not from the format: from the OS file cache a checkpoint loads in about 7 s.
-
-## Not implemented yet
-
-- references combined with `init_image` / `mask`
-- LoKr/LoHa
-- request queue: generations run strictly one at a time
-- other Qwen models for the enhancer (Qwen3.5-4B-Abliterated, qwen3_8b): links to them
-  in `models/text_encoders` are created, but the loader currently supports only Qwen3-VL-4B
+| Resolutions | 480, 720, 1080 pixel budget; 16:9, 4:3, 3:2, 21:9, 1:1 and portrait variants ([details](guides/resolutions.md)) |
+| Checkpoints | mxfp8, float8_e4m3fn, int8 tensorwise, bare fp8, GGUF q8_0; turbo and raw kinds ([details](guides/checkpoints.md)) |
+| LoRA | Standard LoRA files with 7 key naming schemes; LoKr/LoHa not supported ([details](guides/loras.md)) |
+| Modes | text-to-image, image-to-image, inpaint, reference editing, outpainting, background removal ([details](guides/image-modes.md)) |
+| Interfaces | HTTP API (`/generate`, `/checkpoints/load`, `/enhance-prompt`, ...) and CLI ([details](guides/api-and-cli.md)) |
+| Hardware | NVIDIA CUDA GPUs; fast modes on 50-series only ([details](guides/performance.md)) |
+
+Known limitations:
+
+- Reference pictures cannot be combined with `init_image` or `mask`.
+- Two references work only at the 480 tier; one reference goes up to 720. 1080 is not supported for editing.
+- Generations run one at a time; there is no request queue.
+- The prompt enhancer supports only Qwen3-VL-4B.
+
+## Documentation
+
+- [Image modes](guides/image-modes.md): image-to-image, inpaint, reference editing, outpainting, background removal
+- [API and CLI](guides/api-and-cli.md): endpoints, request fields, command-line flags, prompt enhancer
+- [Configuration](guides/configuration.md): all `MY_DIFFUSION_*` variables
+- [Checkpoints](guides/checkpoints.md): formats, turbo and raw, guidance
+- [Resolutions](guides/resolutions.md): pixel budgets and aspect ratios
+- [LoRA](guides/loras.md): using LoRA files
+- [Performance](guides/performance.md): measurements, memory, attention kernel, multiplication modes
+- [Architecture](guides/architecture.md): how the engine works, design decisions, rejected experiments
+- [Development](guides/development.md): tests, verification scripts, what is not implemented yet
