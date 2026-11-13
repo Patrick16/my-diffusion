@@ -40,6 +40,8 @@ All endpoints except `/health` and `/resolutions` need an API key once keys are 
 | `GET /resolutions` | table of sizes |
 | `GET /checkpoints`, `POST /checkpoints/load` | list and switch the checkpoint without a restart |
 | `GET /loras` | list of LoRAs |
+| `GET /config`, `PATCH /config` | admins: read and change the server's settings while it runs ([details](configuration.md#changing-settings-at-run-time)) |
+| `GET /fs` | admins: folders on the server, for choosing the model folders ([details](configuration.md#choosing-folders-get-fs)) |
 
 Example request:
 
@@ -75,12 +77,15 @@ uv run my-diffusion-generate "a fox in the snow, golden hour" --resolution 720 -
 | `--shift` | schedule shift `mu`; default is automatic |
 | `--lora NAME[:WEIGHT]` | repeatable, see [LoRA](loras.md) |
 | `--enhance` | expand the prompt with Qwen first |
-| `--checkpoint` | file in `models/checkpoints` |
+| `--checkpoint` | file in the checkpoints folder (`models/checkpoints` unless set otherwise) |
 | `--matmul`, `--attention` | override the modes from the settings (see [performance](performance.md)) |
 | `--init-image`, `--strength`, `--mask`, `--feather` | image-to-image and inpaint |
 | `--reference` (up to 2), `--reference-mode`, `--outpaint T B L R`, `--keep-original`, `--remove-background` | reference editing; see [image modes](image-modes.md) |
 
 Full help: `uv run my-diffusion-generate --help`.
+
+The command line reads the same settings as the server, including those saved through `PATCH /config`
+(the [override file](configuration.md#where-changes-are-saved)).
 
 ## Prompt enhancer
 

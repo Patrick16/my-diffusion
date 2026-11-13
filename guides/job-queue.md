@@ -105,6 +105,10 @@ requests does not make everyone else wait for all ten. With a single user it is 
 | `MY_DIFFUSION_QUEUE_MAX_PENDING` | `16` | jobs waiting at once, all users together; beyond that `429` |
 | `MY_DIFFUSION_QUEUE_MAX_PER_USER` | `3` | jobs waiting or running per user; admins are exempt |
 
+The limits can be changed while the server runs, by an admin: `PATCH /config` with
+`{"set": {"queue_max_per_user": 5}}` (see [configuration](configuration.md#changing-settings-at-run-time)).
+Jobs already waiting stay in the queue.
+
 ## Several GPUs
 
 A GPU runs one generation at a time: one generation fills it (up to about 14 GB of VRAM at 1080p), so two at once
@@ -163,7 +167,6 @@ Without keys configured, leave out `$headers`.
 
 - No automatic clean-up of old jobs and pictures.
 - `/enhance-prompt` is not queued: it runs on the first GPU's thread between jobs.
-- No endpoint to read or change the server's configuration at run time (matmul and attention modes, devices, queue limits ...); `/health` only shows a few of them. Planned: an admin-only config endpoint saying which settings apply at once, which reload the models and which need a restart (needed by the web UI's Settings page). It should also let an admin set the checkpoints and LoRA folders (separate settings instead of one `models_dir`, with the paths checked and a server-side folder listing for the UI). The output folder stays read-only: pictures are found by name in it, so changing it would hide old ones.
 - Size limits of reference editing and outpainting: one reference goes up to the 720 tier, two only at 480, and 1080 is not supported, because the network, the edit LoRA and the reference tokens must fit into 16 GB of VRAM together (`EDIT_MAX_TIER` in `engine.py`). Planned: stop refusing these sizes and only warn that they are slower (the web UI already shows such a warning), and look for ways to optimize editing so that large sizes and two references run fast without limits (memory use of the LoRA and reference tokens, offloading, attention).
 - The scheduler lives inside the API process. Separate worker machines would need a shared database (Postgres)
   instead of the SQLite file.
