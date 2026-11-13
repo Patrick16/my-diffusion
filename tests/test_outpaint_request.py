@@ -148,3 +148,18 @@ def test_api_zero_outpaint_passes_validation(client):
     # all zeros = off: gets past validation and stops at "models are loading" (503), not at 400
     r = client.post("/generate", json={"prompt": "x", "outpaint": {}})
     assert r.status_code == 503
+
+
+# ---- CLI: bad combinations stop in argument parsing, before any model is loaded ------------------------------------
+
+@pytest.mark.parametrize("extra, message", [
+    (["--outpaint", "0", "0", "0", "25"], "needs --reference"),
+    (["--reference", "x.png", "--reference-mode", "subjects", "--outpaint", "0", "0", "0", "25"], "--reference-mode scene"),
+    (["--reference", "x.png", "--outpaint", "0", "0", "-5", "25"], "must not be negative"),
+])
+def test_cli_rejects_bad_outpaint(monkeypatch, capsys, extra, message):
+    from my_diffusion import cli
+    monkeypatch.setattr("sys.argv", ["my-diffusion-generate", "prompt", *extra])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 2 and message in capsys.readouterr().err

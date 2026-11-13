@@ -439,13 +439,15 @@ class Krea2Engine:
         # Editing: the reference frames, prepared on the CPU now (cheap). In "scene" mode reference 1 gets
         # the output frame itself; the others (all of them in "subjects" mode) keep their proportions and sit centred in the frame, at an
         # offset in tokens. Every side is a multiple of 16, so each latent cuts into whole 2x2 patches.
+        cut_seconds = None
         if cut_background:
             t0 = time.time()
             references = [
                 background.remove_background(ref, path=rembg_path) if k >= first_subject else ref
                 for k, ref in enumerate(references)
             ]
-            logger.info("background removed from %d reference(s): %.1fs", len(references) - first_subject, time.time() - t0)
+            cut_seconds = time.time() - t0
+            logger.info("background removed from %d reference(s): %.1fs", len(references) - first_subject, cut_seconds)
         frames: list[Image.Image] = []
         offsets: list[tuple[int, int]] = []
         for k, ref in enumerate(references):
@@ -469,6 +471,8 @@ class Krea2Engine:
         if references:
             lora_files, edit_rank = self._with_edit_lora(lora_files, width, height, len(references))
         timings: dict[str, float] = {}
+        if cut_seconds is not None:
+            timings["remove_background"] = cut_seconds   # CPU preparation, before "total" starts counting
         t_all = time.time()
 
         # 1. text (with the reference pictures when editing)

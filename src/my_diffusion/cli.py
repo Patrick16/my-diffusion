@@ -108,6 +108,10 @@ def main() -> None:
         )
         if result["mode"] == "edit":
             mode = f", edit refs={result['references']} lora_rank={result['edit_lora_rank']}"
+            if result["outpaint"]:
+                mode += " outpaint=" + "/".join(f"{v:g}" for v in result["outpaint"].values()) + " (top/bottom/left/right %)"
+            if result["remove_background"] != "none":
+                mode += f" remove_background={result['remove_background']}"
         elif result["mode"] == "inpaint":
             mode = ", inpaint"
         elif result["mode"] == "image2image":
