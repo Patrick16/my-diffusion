@@ -10,12 +10,82 @@ from __future__ import annotations
 import hashlib
 import io
 import math
+from typing import NamedTuple
 
 import torch
 from PIL import Image, UnidentifiedImageError
 
+from .resolutions import resolve_dimensions_from_size
+
 # One Krea 2 token covers 16x16 image pixels: the VAE shrinks 8x and the network packs 2x2 latent cells.
 PATCH_PIXELS = 16
+
+
+class Margins(NamedTuple):
+    """How much to grow the source picture on each side, in percent of the source's own side
+    (top/bottom relative to its height, left/right to its width) - the Wan2GP convention."""
+
+    top: float = 0.0
+    bottom: float = 0.0
+    left: float = 0.0
+    right: float = 0.0
+
+    def validate(self) -> "Margins":
+        """Raise ValueError unless every margin is a finite number >= 0; return self for chaining.
+        (A NamedTuple cannot validate in its constructor, so outpaint_frame calls this.)"""
+        for name, value in zip(self._fields, self):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"margin {name} must be a finite number >= 0, got {value!r}")
+        return self
+
+
+def _quantize_axis(before: float, total: int, inner_raw: float, quantum: int) -> tuple[int, int]:
+    """Snap one axis of the frame to the token grid. Returns (offset, size) of the source.
+
+    Why: the source is placed at a token offset (margin // 16), so both margins must be multiples
+    of 16. Each margin is rounded on its own; since `total` is a multiple of 16 too, the source
+    size comes out as a multiple of 16 as well. If rounding would leave less than one token for
+    the source (tiny source, huge margins), the larger margin is cut back so the source never
+    overflows the frame."""
+    after = total - before - inner_raw
+    before_q = max(0, round(before / quantum) * quantum)
+    after_q = max(0, round(after / quantum) * quantum)
+    overflow = before_q + after_q + quantum - total
+    if overflow > 0:
+        cut = math.ceil(overflow / quantum) * quantum
+        if after_q >= before_q:
+            after_q = max(0, after_q - cut)
+        else:
+            before_q = max(0, before_q - cut)
+    return before_q, total - before_q - after_q
+
+
+def outpaint_frame(
+    src_w: int, src_h: int, margins: Margins, tier: str
+) -> tuple[int, int, tuple[int, int, int, int]]:
+    """Plan an outpainting canvas: returns (frame_w, frame_h, src_box).
+
+    The "full area" is the source grown by the margins. The frame is that area at the tier's pixel
+    budget and its exact aspect ratio (sides multiples of 16), so outpainting costs the same as
+    any other generation of the tier. src_box = (left, top, width, height) is where the source
+    goes inside the frame: offsets and size are multiples of 16, the source is at least one token
+    and always inside the frame. Whatever is outside the box is the area to be painted."""
+    margins = Margins(*margins).validate()
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError(f"source size must be positive, got {src_w}x{src_h}")
+    top, bottom, left, right = margins
+    full_w = src_w * (100 + left + right) / 100
+    full_h = src_h * (100 + top + bottom) / 100
+    frame_w, frame_h = resolve_dimensions_from_size(tier, full_w, full_h)
+
+    # Margins scale with the frame in proportion to the full area; the source gets the rest.
+    box_left, box_w = _quantize_axis(
+        frame_w * left / (100 + left + right), frame_w, frame_w * 100 / (100 + left + right), PATCH_PIXELS
+    )
+    box_top, box_h = _quantize_axis(
+        frame_h * top / (100 + top + bottom), frame_h, frame_h * 100 / (100 + top + bottom), PATCH_PIXELS
+    )
+    return frame_w, frame_h, (box_left, box_top, box_w, box_h)
 
 
 def load_rgb(data: bytes) -> Image.Image:

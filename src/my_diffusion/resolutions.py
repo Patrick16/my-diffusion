@@ -77,6 +77,21 @@ def resolve_dimensions(tier: str, aspect_ratio: str) -> Dimensions:
     return Dimensions(width=_round_to_block(raw_width), height=_round_to_block(raw_height))
 
 
+def resolve_dimensions_from_size(tier: str, width: float, height: float) -> Dimensions:
+    """tier + the size of a given picture -> (width, height) with the tier's pixel budget and the
+    picture's own aspect ratio (Wan2GP's calculate_new_dimensions with fit_canvas=0).
+
+    Why: snapping to the nearest preset (see nearest_aspect_ratio) distorts or crops a picture
+    whose proportions are not in the list. Here the aspect is kept as exactly as the 16-pixel
+    grid allows, while the GPU cost stays the same as for any other frame of this tier."""
+    if tier not in RESOLUTION_TIERS:
+        raise ValueError(f"Unknown resolution tier: {tier!r}. Available: {list(RESOLUTION_TIERS)}")
+    if not (width > 0 and height > 0 and math.isfinite(width) and math.isfinite(height)):
+        raise ValueError(f"picture size must be positive, got {width}x{height}")
+    scale = math.sqrt(_pixel_budget(tier) / (width * height))
+    return Dimensions(width=_round_to_block(width * scale), height=_round_to_block(height * scale))
+
+
 def nearest_aspect_ratio(width: int, height: int) -> str:
     """The ASPECT_RATIOS entry closest to width/height (used by aspect_ratio="auto" in editing).
 
