@@ -50,21 +50,48 @@ from .weights import QLinear, shared_input, streamed_adapters
 #     per prompt length there - the preparation would cost more than it saves;
 #   - the preparation is remembered separately in each thread, so the server runs all generations
 #     in the same thread (see api.py).
-ATTENTION_KERNELS = ("cudnn", "default")
+#
+#   sage2   - SageAttention 2 (the optional `sageattention` package, see the "sage2" group in pyproject.toml).
+#             Unlike the two above it is an APPROXIMATION: queries and keys are quantized to int8, the attention
+#             weights and values to fp8, and the products run on the tensor cores. One call is 1.9-2.5x faster
+#             than cudnn (480p 1.3 -> 0.65 ms, 1080p 22 -> 9.4 ms, 1080p + a reference 88 -> 40 ms), but its
+#             output is ~4% away from a float32 reference where cudnn is 0.4% away, so the picture changes.
+#             Never chosen automatically. Sequences shorter than `sage_min_tokens` still go to cudnn: there the
+#             kernel saves little time and costs the same accuracy.
+ATTENTION_KERNELS = ("cudnn", "default", "sage2")
 CUDNN_FIRST = [SDPBackend.CUDNN_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
 _CAN_SET_PRIORITY = "set_priority" in inspect.signature(sdpa_kernel).parameters
+_sageattn = None   # sageattention.sageattn, imported on first use (the package is optional)
 
 
-def set_attention_kernel(blocks: nn.Module, kernel: str) -> None:
+def _load_sageattn():
+    global _sageattn
+    if _sageattn is None:
+        try:
+            from sageattention import sageattn
+        except ImportError as e:
+            raise RuntimeError(
+                "the sage2 attention kernel needs the optional sageattention package (with triton-windows): "
+                f"install it with `uv sync --group sage2` or set MY_DIFFUSION_ATTENTION=cudnn ({e})"
+            ) from e
+        _sageattn = sageattn
+    return _sageattn
+
+
+def set_attention_kernel(blocks: nn.Module, kernel: str, sage_min_tokens: int = 0) -> None:
     """Selects the attention kernel (see ATTENTION_KERNELS) for all attention layers inside blocks.
-    For the Krea 2 network, model.blocks is passed here - the main blocks, without the text part."""
+    For the Krea 2 network, model.blocks is passed here - the main blocks, without the text part.
+    sage_min_tokens - only for sage2: sequences shorter than this are computed by cudnn."""
     if kernel not in ATTENTION_KERNELS:
         raise ValueError(f"unknown attention kernel {kernel!r}; available: {ATTENTION_KERNELS}")
-    if kernel == "cudnn" and not _CAN_SET_PRIORITY:
-        raise RuntimeError("the cudnn attention kernel needs a newer torch (no sdpa_kernel(set_priority=...)); set MY_DIFFUSION_ATTENTION=default")
+    if kernel in ("cudnn", "sage2") and not _CAN_SET_PRIORITY:
+        raise RuntimeError(f"the {kernel} attention kernel needs a newer torch (no sdpa_kernel(set_priority=...)); set MY_DIFFUSION_ATTENTION=default")
+    if kernel == "sage2":
+        _load_sageattn()   # fail here, at load time, not in the middle of the first generation
     for module in blocks.modules():
         if isinstance(module, Attention):
             module.kernel = kernel
+            module.sage_min_tokens = sage_min_tokens
 
 
 @dataclass(frozen=True)
@@ -159,6 +186,7 @@ class Attention(nn.Module):
         self.qknorm = QKNorm(self.headdim)
         self.wo = QLinear(dim, dim, bias=False)
         self.kernel = "default"   # attention kernel; set by set_attention_kernel
+        self.sage_min_tokens = 0  # with the sage2 kernel: shorter sequences are computed by cudnn
 
     def forward(self, x: torch.Tensor, rope: torch.Tensor | None = None) -> torch.Tensor:
         b, n, _ = x.shape
@@ -173,7 +201,9 @@ class Attention(nn.Module):
             rep = self.heads // self.kvheads
             k = k.repeat_interleave(rep, dim=1)
             v = v.repeat_interleave(rep, dim=1)
-        if self.kernel == "cudnn":
+        if self.kernel == "sage2" and n >= self.sage_min_tokens:
+            out = _sageattn(q, k, v, tensor_layout="HND", is_causal=False)
+        elif self.kernel in ("cudnn", "sage2"):
             with sdpa_kernel(CUDNN_FIRST, set_priority=True):
                 out = F.scaled_dot_product_attention(q, k, v)
         else:

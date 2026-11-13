@@ -29,11 +29,21 @@ my-diffusion-generate = "my_diffusion.cli:main"
 dev = [
     "pytest",
 ]
+# Optional attention kernel "sage2" (MY_DIFFUSION_ATTENTION=sage2, see transformer.py): SageAttention 2 computes
+# attention on quantized values (Q, K in int8; P, V in fp8), which is faster on long sequences but approximate.
+# Not installed by default: `uv sync --group sage2`. Windows only (prebuilt wheel); the wheel is built for
+# torch >= 2.10 with CUDA 12.8 and needs triton-windows of the matching torch generation (3.7 for torch 2.11).
+sage2 = [
+    "sageattention==2.2.0 ; sys_platform == 'win32'",
+    "triton-windows>=3.7,<3.8 ; sys_platform == 'win32'",
+]
 
 [tool.uv.sources]
 # torch is installed from the PyTorch index for CUDA 12.8 (the PyPI build for Windows is CPU-only).
 # For another CUDA version, change the index accordingly (cu130 is described below).
 torch = { index = "pytorch-cu128" }
+# SageAttention is not on PyPI for Windows: the prebuilt wheel from the woct0rdho fork (the cu128 build matches our torch).
+sageattention = { url = "https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post6/sageattention-2.2.0+cu128torch2.10.0andhigher.post6-cp310-abi3-win_amd64.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

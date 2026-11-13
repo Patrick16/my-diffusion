@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.nn.attention import sdpa_kernel
 
-from my_diffusion import sampler
+from my_diffusion import sampler, transformer
 from my_diffusion.config import Settings
 from my_diffusion.resolutions import ASPECT_RATIOS, RESOLUTION_TIERS, resolve_dimensions
 from my_diffusion.transformer import (
@@ -82,7 +82,9 @@ def synthetic(device: str, attention: str) -> None:
         def attention_core() -> None:
             qq, kk = apply_rope(attn.qknorm.qnorm(q), rope), apply_rope(attn.qknorm.knorm(k), rope)
             kk = kk.repeat_interleave(cfg.heads // cfg.kvheads, dim=1)
-            if attn.kernel == "cudnn":
+            if attn.kernel == "sage2":
+                transformer._sageattn(qq, kk, kk, tensor_layout="HND", is_causal=False)
+            elif attn.kernel == "cudnn":
                 with sdpa_kernel(CUDNN_FIRST, set_priority=True):
                     F.scaled_dot_product_attention(qq, kk, kk)
             else:

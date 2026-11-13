@@ -47,8 +47,11 @@ class Settings(BaseSettings):
     # Which kernel computes the network's attention (details at the top of transformer.py):
     #   cudnn   - the kernel from NVIDIA's cuDNN library: 2-2.4x faster, the result differs
     #             from default only at the rounding level;
-    #   default - whatever torch picks; for comparison with ComfyUI.
-    attention: Literal["cudnn", "default"] = "cudnn"
+    #   default - whatever torch picks; for comparison with ComfyUI;
+    #   sage2   - SageAttention 2: an approximate kernel on quantized values, faster on large pictures and on
+    #             edits with references, but the picture differs from cudnn. Needs the optional package:
+    #             `uv sync --group sage2`. Never chosen automatically.
+    attention: Literal["cudnn", "default", "sage2"] = "cudnn"
 
     # Keep model weights in "pinned" RAM: copying from it to the
     # GPU is 6-9x faster, and switching models on the GPU takes fractions of a second instead of
