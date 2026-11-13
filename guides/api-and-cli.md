@@ -8,13 +8,32 @@ The same engine is reachable two ways: an HTTP server and a CLI. Both accept the
 uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000
 ```
 
-Interactive documentation is served at http://127.0.0.1:8000/docs.
+The server documents itself. The same OpenAPI schema is shown three ways; pick the one you like:
+
+| Address | What |
+|---|---|
+| http://127.0.0.1:8000/docs | Swagger UI: every endpoint with a *Try it out* form |
+| http://127.0.0.1:8000/scalar | Scalar: the same, with ready-made request snippets (curl, Python, JavaScript ...) |
+| http://127.0.0.1:8000/redoc | ReDoc: read-only, convenient for reading |
+| http://127.0.0.1:8000/openapi.json | the schema itself, for generating a client (OpenAPI 3.1) |
+
+When API keys are configured, press *Authorize* (Swagger) or pick the auth type (Scalar) and paste the key; a
+service client's `X-User-Id` goes there too. The pages load their scripts from the jsdelivr CDN, so they need
+internet access in the browser; Scalar is pinned to an exact version and checked by its hash, and its cloud
+features (AI assistant, SDK generator, telemetry) are switched off. `MY_DIFFUSION_API_DOCS=false` removes all
+four addresses.
 
 | Endpoint | What it does |
 |---|---|
 | `GET /health` | `loading` / `ok` / `error`, the current checkpoint |
-| `POST /generate` | generation; the response is the path to a PNG, the parameters and timings |
-| `GET /outputs/<file>` | fetch a finished image |
+| `POST /generate` | queue a generation; answers at once (`202`) with the job id |
+| `GET /result/{job_id}` | the job: status, position in the queue, progress, result or error |
+| `GET /result/{job_id}/image` | the finished PNG |
+| `POST /cancel/{job_id}` | cancel a waiting or running job |
+| `GET /jobs` | your jobs (an admin sees everybody's) |
+
+All endpoints except `/health` and `/resolutions` need an API key once keys are configured; see
+[jobs, queue and access](job-queue.md).
 | `POST /enhance-prompt` | only rewrite the prompt |
 | `GET /resolutions` | table of sizes |
 | `GET /checkpoints`, `POST /checkpoints/load` | list and switch the checkpoint without a restart |

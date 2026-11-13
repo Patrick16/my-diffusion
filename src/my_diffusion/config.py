@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -76,9 +77,47 @@ class Settings(BaseSettings):
     # --- background removal (background.py) ---
     rembg_model: str = "rembg/u2net.onnx"               # file in models/ (u2net ONNX, run by onnxruntime on the CPU)
 
+    # --- job queue and scheduler (store.py, jobs.py) ---
+    # Which GPUs run jobs. One "slot" per device, each with its own engine and its own copy of the models.
+    # None - only `device` (one slot: the normal setup). "auto" - every visible CUDA device.
+    # A list such as ["cuda:0", "cuda:1"] - exactly those. A GPU runs one generation at a time: one generation
+    # fills it (up to ~14 GB of VRAM at 1080p), so more jobs per card would only make each one slower.
+    # Cost of every extra slot: another copy of the weights in RAM (~19 GB pinned).
+    devices: list[str] | Literal["auto"] | None = None
+    # Jobs and their state live in SQLite, so the queue survives a restart.
+    database_path: Path = PROJECT_ROOT / "data" / "jobs.sqlite3"
+    # Pictures sent with a job (init_image, mask, references) wait here until the job ends, then are deleted.
+    inputs_dir: Path = PROJECT_ROOT / "data" / "inputs"
+    # How many jobs may wait at once (all users together), and per user (queued + running; admins are exempt).
+    queue_max_pending: int = Field(default=16, ge=1)
+    queue_max_per_user: int = Field(default=3, ge=1)
+
+    # --- access (auth.py) ---
+    # Client name -> secret key, sent as "Authorization: Bearer <key>". Empty = access control is OFF and every
+    # request is an admin: fine for a server on 127.0.0.1 used by one person, not for anything shared.
+    # Example: MY_DIFFUSION_API_KEYS='{"web": "<32+ random chars>", "telegram": "<another one>"}'
+    api_keys: dict[str, str] = Field(default_factory=dict)
+    # Clients whose key gives admin rights: they see and cancel every job. The others are "services" that act
+    # for an end user named in the X-User-Id header (the Telegram bot passes the Telegram user id there).
+    admin_clients: list[str] = Field(default_factory=list)
+
     # --- API ---
     host: str = "127.0.0.1"
     port: int = 8000
+    # Interactive API documentation: /docs (Swagger UI), /redoc (ReDoc), /scalar (Scalar) and the schema at
+    # /openapi.json. The pages need no key (the key is entered in them), but they show the whole API surface,
+    # so a server open to the internet may turn them off.
+    api_docs: bool = True
+
+    @field_validator("api_keys")
+    @classmethod
+    def _strong_keys(cls, keys: dict[str, str]) -> dict[str, str]:
+        weak = [name for name, secret in keys.items() if len(secret) < 16]
+        if weak:
+            raise ValueError(f"API keys must be at least 16 characters long; too short: {weak}")
+        if len(set(keys.values())) != len(keys):
+            raise ValueError("every client needs its own API key")
+        return keys
 
     @property
     def checkpoint_path(self) -> Path:

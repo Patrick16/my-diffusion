@@ -1,12 +1,13 @@
 """Shape of the API requests and responses.
 
-The response to a generation is not the image bytes but the path to a PNG in outputs/: the server and the client
-are on one machine, so there is no point in pushing megabytes of base64 through HTTP. The image itself can be
-fetched via GET /outputs/<file name>."""
+A generation is a job (see api.py): the answer is the job's status, never the picture in base64. The PNG is fetched
+separately, with GET /result/{id}/image, after the access check."""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from .resolutions import ASPECT_RATIOS, RESOLUTION_TIERS
 
@@ -26,6 +27,15 @@ class OutpaintMargins(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    # Shown by the documentation pages as the starting body of "Try it".
+    model_config = ConfigDict(json_schema_extra={"examples": [{
+        "prompt": "a fox in the snow, golden hour",
+        "resolution": "720",
+        "aspect_ratio": "16:9",
+        "seed": 42,
+        "loras": [{"name": "KreaAmateur_V2", "weight": 0.8}],
+    }]})
+
     prompt: str
     negative_prompt: str = Field(default="", description="Only works when guidance_scale != 1 (that is, on raw checkpoints)")
 
@@ -58,8 +68,9 @@ class GenerateRequest(BaseModel):
     remove_background: str = Field(default="none", pattern="^(none|subjects)$", description="'subjects': cut the background out of the people / objects before use - references 2.. in 'scene' mode, all references in 'subjects' mode")
 
 
-class GenerateResponse(BaseModel):
-    image_path: str
+class GenerationResult(BaseModel):
+    """What a finished generation reports. The picture itself is fetched with GET /result/{id}/image."""
+
     width: int
     height: int
     seed: int
@@ -82,6 +93,32 @@ class GenerateResponse(BaseModel):
     remove_background: str = Field(default="none", description="'subjects' if the background of some references was removed")
     keep_original: bool = Field(default=False, description="True if reference 1's pixels were kept in an outpaint")
     edit_lora_rank: int | None = None
+
+
+class GenerateResponse(GenerationResult):
+    """The engine's own result, with the server-side path of the PNG (CLI and scripts)."""
+
+    image_path: str
+
+
+class JobInfo(BaseModel):
+    """A generation job: the answer of POST /generate, GET /result/{id}, POST /cancel/{id} and GET /jobs."""
+
+    job_id: str
+    status: Literal["queued", "running", "done", "failed", "cancelled"]
+    cancel_requested: bool = Field(description="True once a cancel was asked; a running job stops at its next step")
+    owner: str = Field(description="'<client>:<user>' that created the job")
+    position: int | None = Field(default=None, description="1 = next to start; None once the job is not waiting")
+    step: int | None = Field(default=None, description="Network steps finished so far (running jobs)")
+    total_steps: int | None = None
+    created_at: float = Field(description="Unix time the job entered the queue")
+    started_at: float | None = None
+    finished_at: float | None = None
+    slot: str | None = Field(default=None, description="The GPU the job ran on")
+    params: dict = Field(description="The request as submitted, without the pictures")
+    result: GenerationResult | None = Field(default=None, description="Set when status is done")
+    image_url: str | None = Field(default=None, description="Where to fetch the PNG, when status is done")
+    error: str | None = Field(default=None, description="Set when status is failed")
 
 
 class EnhancePromptRequest(BaseModel):

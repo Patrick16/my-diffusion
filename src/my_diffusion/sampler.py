@@ -23,9 +23,12 @@ not by 1.15."""
 from __future__ import annotations
 
 import math
+import threading
 from typing import Callable
 
 import torch
+
+from . import cancellation
 
 # Dependence of mu on the image size - as in Krea's reference code (and in Wan2GP):
 # linear from 0.5 at 256 tokens (256x256 px) to 1.15 at 6400 tokens (1280x1280 px).
@@ -112,6 +115,7 @@ def sample(
     guidance_interval: tuple[float, float] = (0.0, 1.0),
     post_step: Callable[[torch.Tensor, float], torch.Tensor] | None = None,
     refs: list[tuple[torch.Tensor, tuple[int, int]]] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> torch.Tensor:
     """Returns the latent of the finished image (in the model's normalized space).
 
@@ -141,6 +145,10 @@ def sample(
     network returns the velocity of the generated picture alone, so the Euler step and post_step
     never touch them. With refs=None the network is called exactly as before, without the argument.
 
+    cancel_event - checked before every step (see cancellation.py). When it is set the loop stops with
+    GenerationCancelled before the next network call; without it nothing changes. on_step(done, total)
+    is called after every step, which is how the job queue reports progress.
+
     What is deliberately not here: skipping steps with a cache (reusing the deep blocks' output of the
     previous step when the first block's output changed little). It was measured on this network and
     rejected: the reused part is 11-40% off even between neighbouring steps, and the resulting image
@@ -154,6 +162,7 @@ def sample(
     uncond = model.embed_text(uncond) if use_cfg else None
     extra = {} if refs is None else {"refs": refs}   # no refs -> the very same call as without editing
     for i in range(steps):
+        cancellation.checkpoint(cancel_event)
         sigma, sigma_next = sigmas[i], sigmas[i + 1]
         s = torch.full((x.shape[0],), sigma, device=x.device, dtype=torch.float32)
         v = model(x, s, cond, **extra).float()

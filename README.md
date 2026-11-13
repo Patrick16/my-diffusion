@@ -15,7 +15,9 @@ command line.
 - **Prompt enhancer**: Qwen3-VL expands a short idea into a detailed prompt
 - **Checkpoints** in mxfp8, fp8, int8, and GGUF q8_0 formats; switch them without a restart
 - **Fast inference** on NVIDIA GPUs: quantized matrix multiplication, pinned memory, cuDNN attention
-- **HTTP API** with interactive docs at `/docs`, and a **CLI**
+- **Jobs**: `POST /generate` returns a job id at once; a scheduler runs the queue on one or more GPUs, fairly between users; jobs can be cancelled while waiting or running and survive a restart (SQLite)
+- **Access control**: API keys per client; users see only their own jobs and pictures, admins see all
+- **HTTP API** with an OpenAPI schema and interactive docs (Swagger UI at `/docs`, Scalar at `/scalar`, ReDoc at `/redoc`), and a **CLI**
 
 ## Requirements
 
@@ -50,7 +52,7 @@ Generate an image from the command line:
 uv run my-diffusion-generate "a fox in the snow, golden hour" --resolution 720 --aspect-ratio 16:9
 ```
 
-Start the HTTP server (interactive documentation at http://127.0.0.1:8000/docs):
+Start the HTTP server (interactive documentation at http://127.0.0.1:8000/docs or http://127.0.0.1:8000/scalar):
 
 ```bash
 uv run uvicorn my_diffusion.api:app --host 127.0.0.1 --port 8000
@@ -83,14 +85,15 @@ Reference editing also needs the edit LoRA `krea2_identity_edit_v1_2` in `models
 | Checkpoints | mxfp8, float8_e4m3fn, int8 tensorwise, bare fp8, GGUF q8_0; turbo and raw kinds ([details](guides/checkpoints.md)) |
 | LoRA | Standard LoRA files with 7 key naming schemes; LoKr/LoHa not supported ([details](guides/loras.md)) |
 | Modes | text-to-image, image-to-image, inpaint, reference editing, outpainting, background removal ([details](guides/image-modes.md)) |
-| Interfaces | HTTP API (`/generate`, `/checkpoints/load`, `/enhance-prompt`, ...) and CLI ([details](guides/api-and-cli.md)) |
+| Interfaces | HTTP API (`/generate`, `/result/{id}`, `/cancel/{id}`, `/checkpoints/load`, ...) and CLI ([details](guides/api-and-cli.md)) |
 | Hardware | NVIDIA CUDA GPUs; fast modes on 50-series only ([details](guides/performance.md)) |
 
 Known limitations:
 
 - Reference pictures cannot be combined with `init_image` or `mask`.
 - Two references work only at the 480 tier; one reference goes up to 720. 1080 is not supported for editing.
-- Generations run one at a time; there is no request queue.
+- A GPU runs one generation at a time; more GPUs run more jobs at once, but each holds its own copy of the models in RAM (multi-GPU is not tested yet). Run the server as a single process.
+- Without `MY_DIFFUSION_API_KEYS` access control is off and every caller is an admin: keep such a server on `127.0.0.1`.
 - The prompt enhancer supports only Qwen3-VL-4B.
 
 ## Documentation
@@ -101,6 +104,7 @@ Known limitations:
 - [Checkpoints](guides/checkpoints.md): formats, turbo and raw, guidance
 - [Resolutions](guides/resolutions.md): pixel budgets and aspect ratios
 - [LoRA](guides/loras.md): using LoRA files
+- [Jobs, queue and access](guides/job-queue.md): the generate / result / cancel flow, API keys, fairness, several GPUs, restarts
 - [Performance](guides/performance.md): measurements, memory, attention kernel, multiplication modes
 - [Architecture](guides/architecture.md): how the engine works, design decisions, rejected experiments
 - [Development](guides/development.md): tests, verification scripts, what is not implemented yet
