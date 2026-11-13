@@ -51,6 +51,7 @@ def main() -> None:
     parser.add_argument("--reference", action="append", type=Path, default=[], metavar="PATH", help="reference editing, can be given up to 2 times: 1 = the scene, 2 = a subject or person; cannot be combined with --init-image or --mask")
     parser.add_argument("--reference-mode", choices=["scene", "subjects"], default="scene", help="'scene': --reference 1 is the main scene, the rest are people / objects; 'subjects': all references are people / objects")
     parser.add_argument("--outpaint", nargs=4, type=float, default=None, metavar=("TOP", "BOTTOM", "LEFT", "RIGHT"), help="extend reference 1 by these percentages of its sides and generate the new area (needs --reference, scene mode; replaces --aspect-ratio)")
+    parser.add_argument("--keep-original", action="store_true", help="with --outpaint: keep reference 1's pixels unchanged and generate only the margins (default: the model may lightly redraw it)")
     parser.add_argument("--remove-background", action="store_true", help="cut the background out of the people / objects: references 2.. in scene mode, all in subjects mode")
     args = parser.parse_args()
     if args.outpaint is not None and any(args.outpaint):
@@ -60,6 +61,8 @@ def main() -> None:
             parser.error("--outpaint needs --reference-mode scene")
         if any(not math.isfinite(v) or v < 0 or v > 300 for v in args.outpaint):
             parser.error("--outpaint margins must be numbers from 0 to 300 (percent)")
+    elif args.keep_original:
+        parser.error("--keep-original needs --outpaint with non-zero margins")
     if args.aspect_ratio == "auto" and args.reference_mode != "scene":
         parser.error("--aspect-ratio auto needs --reference-mode scene")
     if len(args.reference) > 2:
@@ -106,11 +109,14 @@ def main() -> None:
             reference_mode=args.reference_mode,
             outpaint=None if args.outpaint is None else tuple(args.outpaint),
             remove_background="subjects" if args.remove_background else "none",
+            keep_original=args.keep_original,
         )
         if result["mode"] == "edit":
             mode = f", edit refs={result['references']} lora_rank={result['edit_lora_rank']}"
             if result["outpaint"]:
                 mode += " outpaint=" + "/".join(f"{v:g}" for v in result["outpaint"].values()) + " (top/bottom/left/right %)"
+                if result["keep_original"]:
+                    mode += " keep_original"
             if result["remove_background"] != "none":
                 mode += f" remove_background={result['remove_background']}"
         elif result["mode"] == "inpaint":

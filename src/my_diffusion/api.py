@@ -182,6 +182,8 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
             raise HTTPException(400, "outpaint needs references")
         if request.reference_mode != "scene":
             raise HTTPException(400, "outpaint needs reference_mode 'scene'")
+    elif request.keep_original:
+        raise HTTPException(400, "keep_original needs outpaint (non-zero margins)")
     if request.mask is not None and request.init_image is None:
         raise HTTPException(400, "mask needs init_image")
     if request.strength is not None and request.init_image is None:
@@ -212,5 +214,6 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
         reference_mode=request.reference_mode,
         outpaint=None if outpaint is None else (outpaint.top, outpaint.bottom, outpaint.left, outpaint.right),
         remove_background=request.remove_background,
+        keep_original=request.keep_original,
     )
     return GenerateResponse(**result)
