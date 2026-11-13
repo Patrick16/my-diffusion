@@ -21,7 +21,7 @@ class GenerateRequest(BaseModel):
     negative_prompt: str = Field(default="", description="Only works when guidance_scale != 1 (that is, on raw checkpoints)")
 
     resolution: str = Field(default="720", description=f"One of: {list(RESOLUTION_TIERS)}")
-    aspect_ratio: str = Field(default="16:9", description=f"One of: {list(ASPECT_RATIOS)}; 'auto' is allowed only with references (the ratio nearest to reference 1)")
+    aspect_ratio: str = Field(default="16:9", description=f"One of: {list(ASPECT_RATIOS)}; 'auto' is allowed only with references in 'scene' mode (the exact proportions of reference 1)")
 
     seed: int | None = Field(default=None, description="None - random")
     # None - the default for the checkpoint kind (turbo: 8 steps / 1.0, raw: 28 / 4.5)
@@ -42,7 +42,8 @@ class GenerateRequest(BaseModel):
     feather: int = Field(default=2, ge=0, le=32, description="Softness of the mask edge, in latent pixels (1 latent pixel = 8 image pixels)")
 
     # Reference editing. Cannot be combined with init_image / mask.
-    references: list[str] = Field(default_factory=list, description="Base64 PNG/JPEG reference pictures; 1 = the scene, 2 = a subject or person. Up to config max_references")
+    references: list[str] = Field(default_factory=list, description="Base64 PNG/JPEG reference pictures. Up to config max_references")
+    reference_mode: str = Field(default="scene", pattern="^(scene|subjects)$", description="'scene': reference 1 is the main scene / landscape, the others are people or objects; 'subjects': all references are people or objects (aspect_ratio 'auto' is not allowed)")
 
 
 class GenerateResponse(BaseModel):
@@ -64,6 +65,7 @@ class GenerateResponse(BaseModel):
     strength: float | None = None
     feather: int | None = None
     references: int = 0
+    reference_mode: str | None = None
     edit_lora_rank: int | None = None
 
 

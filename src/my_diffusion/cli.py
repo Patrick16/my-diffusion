@@ -30,7 +30,7 @@ def main() -> None:
     parser.add_argument("prompt")
     parser.add_argument("--negative-prompt", default="")
     parser.add_argument("--resolution", choices=list(RESOLUTION_TIERS), default="720")
-    parser.add_argument("--aspect-ratio", choices=[*ASPECT_RATIOS, "auto"], default="16:9", help="'auto' (only with --reference) takes the ratio nearest to reference 1")
+    parser.add_argument("--aspect-ratio", choices=[*ASPECT_RATIOS, "auto"], default="16:9", help="'auto' (only with --reference, scene mode) takes the exact proportions of reference 1")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--guidance-scale", type=float, default=None)
@@ -48,7 +48,10 @@ def main() -> None:
     parser.add_argument("--mask", type=Path, default=None, metavar="PATH", help="inpaint (needs --init-image): white = regenerate, black = keep; cropped like the picture")
     parser.add_argument("--feather", type=int, default=2, help="inpaint only: soft mask edge in latent pixels, 1 = 8 image pixels (default 2; 0 = hard edge)")
     parser.add_argument("--reference", action="append", type=Path, default=[], metavar="PATH", help="reference editing, can be given up to 2 times: 1 = the scene, 2 = a subject or person; cannot be combined with --init-image or --mask")
+    parser.add_argument("--reference-mode", choices=["scene", "subjects"], default="scene", help="'scene': --reference 1 is the main scene, the rest are people / objects; 'subjects': all references are people / objects")
     args = parser.parse_args()
+    if args.aspect_ratio == "auto" and args.reference_mode != "scene":
+        parser.error("--aspect-ratio auto needs --reference-mode scene")
     if len(args.reference) > 2:
         parser.error(f"at most 2 --reference pictures are supported, got {len(args.reference)}")
     if args.reference and (args.init_image or args.mask):
@@ -90,6 +93,7 @@ def main() -> None:
             mask=mask,
             feather=args.feather,
             references=references,
+            reference_mode=args.reference_mode,
         )
         if result["mode"] == "edit":
             mode = f", edit refs={result['references']} lora_rank={result['edit_lora_rank']}"

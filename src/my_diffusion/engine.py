@@ -29,7 +29,7 @@ from .config import Settings
 from .imaging import cover_crop
 from .lora import LoraFile, apply_loras, load_lora, truncate_rank
 from .memory import GpuSlot, Resident
-from .resolutions import ASPECT_RATIOS, nearest_aspect_ratio, resolve_dimensions
+from .resolutions import ASPECT_RATIOS, resolve_dimensions, resolve_dimensions_from_size
 from .text_encoder import QwenVL
 from .transformer import Krea2Transformer, set_attention_kernel
 from .vae import LATENT_CHANNELS, VAE_SCALE, LatentDecoder
@@ -75,7 +75,10 @@ def _tier_max_pixels(tier: str) -> int:
 EDIT_MAX_TIER = {1: "720", 2: "480"}
 EDIT_RANK_REDUCED = 128   # the edit LoRA is always used at this rank, see edit_lora_rank
 
-IMAGE_CACHE_SIZE = 8   # encodings with pictures are large (~27 MB each: ~440 tokens x 12 layers x 2560), keep fewer
+# What the references are (Wan2GP's "KI" and "I"): reference 1 is the main scene, or all are people / objects.
+REFERENCE_MODES = ("scene", "subjects")
+
+IMAGE_CACHE_SIZE = 8  # encodings with pictures are large (~27 MB each: ~440 tokens x 12 layers x 2560), keep fewer
 
 
 def edit_lora_rank(width: int, height: int, references: int) -> int:
@@ -295,6 +298,7 @@ class Krea2Engine:
         mask: Image.Image | None = None,
         feather: int = 2,
         references: list[Image.Image] | None = None,
+        reference_mode: str = "scene",
     ) -> dict:
         """guidance_interval - the part of the run (as fractions of the steps) where CFG is applied;
         only matters when guidance_scale != 1. See sampler.sample.
@@ -318,7 +322,11 @@ class Krea2Engine:
         from; the prompt says what to do with them ("put the cat from image 1 on a bridge"). Reference 1 is
         the scene: it is cropped to the output frame exactly like init_image. Reference 2 is a subject or a
         person: it keeps its own proportions and is fitted into the frame (imaging.fit_reference).
-        aspect_ratio="auto" (only with references) picks the format closest to reference 1.
+        reference_mode (Wan2GP's "KI" / "I"): "scene" - reference 1 is the main scene, the others are people
+        or objects; "subjects" - every reference is a person or an object, there is no scene, so all of them
+        are fitted with their own proportions and the size comes from resolution + aspect_ratio.
+        aspect_ratio="auto" (only with references, only in "scene" mode) takes the exact proportions of
+        reference 1 at the pixel budget of `resolution` (sides rounded to 16), not the nearest preset.
         Editing switches on three things that only work together: the prepared pictures go into the Qwen
         prompt through its vision tower (the negative prompt, under CFG, gets the same pictures); their
         clean latents are appended to the network's sequence (see Krea2Transformer.forward); and the edit
@@ -330,29 +338,36 @@ class Krea2Engine:
         with self._lock:
             return self._generate(
                 prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
-                tuple(guidance_interval), init_image, strength, mask, feather, list(references or []),
+                tuple(guidance_interval), init_image, strength, mask, feather, list(references or []), reference_mode,
             )
 
     def _generate(
         self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval,
-        init_image=None, strength=None, mask=None, feather=2, references=None,
+        init_image=None, strength=None, mask=None, feather=2, references=None, reference_mode="scene",
     ) -> dict:
         s = self.settings
+        if reference_mode not in REFERENCE_MODES:
+            raise ValueError(f"reference_mode must be one of {list(REFERENCE_MODES)}, got {reference_mode!r}")
         references = list(references or [])
         if len(references) > s.max_references:
             raise ValueError(f"at most {s.max_references} reference pictures are supported, got {len(references)}")
         if references and (init_image is not None or mask is not None):
             raise ValueError("references cannot be combined with an init image or a mask: editing builds the picture from the references")
-        if aspect_ratio == "auto":
+        auto_size = aspect_ratio == "auto"
+        if auto_size:
             if not references:
                 raise ValueError("aspect_ratio 'auto' takes the proportions of reference 1, so it needs references")
-            aspect_ratio = nearest_aspect_ratio(*references[0].size)
+            if reference_mode != "scene":
+                raise ValueError("aspect_ratio 'auto' needs reference_mode 'scene': with 'subjects' no picture is the scene to take the size from")
         defaults = (EDIT_DEFAULTS if references else KIND_DEFAULTS)[self.kind]
         steps = steps or defaults["steps"]
         guidance_scale = defaults["guidance_scale"] if guidance_scale is None else guidance_scale
         sampler.guided_steps(steps, guidance_interval)   # validate now: a bad interval surfaces before the heavy work
         seed = random.randint(0, MAX_SEED) if seed is None else seed
-        width, height = resolve_dimensions(resolution, aspect_ratio)
+        if auto_size:
+            width, height = resolve_dimensions_from_size(resolution, *references[0].size)
+        else:
+            width, height = resolve_dimensions(resolution, aspect_ratio)
         if references:
             tier = EDIT_MAX_TIER[min(len(references), 2)]
             if width * height > _tier_max_pixels(tier):
@@ -371,13 +386,13 @@ class Krea2Engine:
             # shrunk to the latent grid (1 = regenerate, 0 = keep). Cheap and on the CPU: done here, so
             # a bad mask or feather surfaces before the heavy work.
             weight = imaging.mask_to_latent(cover_crop(mask, width, height), height // VAE_SCALE, width // VAE_SCALE, feather)
-        # Editing: the reference frames, prepared on the CPU now (cheap). Reference 1 is the scene and gets
-        # the output frame itself; the others keep their proportions and sit centred in the frame, at an
+        # Editing: the reference frames, prepared on the CPU now (cheap). In "scene" mode reference 1 gets
+        # the output frame itself; the others (all of them in "subjects" mode) keep their proportions and sit centred in the frame, at an
         # offset in tokens. Every side is a multiple of 16, so each latent cuts into whole 2x2 patches.
         frames: list[Image.Image] = []
         offsets: list[tuple[int, int]] = []
         for k, ref in enumerate(references):
-            if k == 0:
+            if k == 0 and reference_mode == "scene":
                 frame, offset = cover_crop(ref.convert("RGB"), width, height), (0, 0)
             else:
                 frame, offset = imaging.fit_reference(ref, width, height)
@@ -517,6 +532,7 @@ class Krea2Engine:
             "strength": None if init_image is None else strength,
             "feather": None if mask is None else feather,
             "references": len(references),
+            "reference_mode": reference_mode if references else None,
             "edit_lora_rank": edit_rank,   # None without editing or with the edit LoRA switched off
             "timings": {k: round(v, 2) for k, v in timings.items()},
         }
