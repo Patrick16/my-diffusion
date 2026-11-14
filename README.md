@@ -90,7 +90,6 @@ Reference editing also needs the edit LoRA `krea2_identity_edit_v1_2` in `models
 
 Known limitations:
 
-- Reference pictures cannot be combined with `init_image` or `mask`.
 - Edits above 720 (one reference) or 480 (two) are slow rather than impossible: the network is streamed from RAM as needed. `MY_DIFFUSION_EDIT_LIMITS` (`strict` / `warn` / `off`, default `warn`) and `MY_DIFFUSION_EDIT_MAX_PIXELS` decide whether such jobs are accepted ([details](guides/image-modes.md)).
 - A GPU runs one generation at a time; more GPUs run more jobs at once, but each holds its own copy of the models in RAM (multi-GPU is not tested yet). Run the server as a single process.
 - Without `MY_DIFFUSION_API_KEYS` access control is off and every caller is an admin: keep such a server on `127.0.0.1`.

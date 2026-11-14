@@ -47,7 +47,7 @@ Refer to them in the prompt as "image 1" and "image 2". Three parts work togethe
 vision encoder of Qwen3-VL (the pictures go into the prompt) and the reference tokens (the pictures'
 latents go into the sequence). None of them works alone. `"aspect_ratio": "auto"` takes the exact
 proportions of reference 1 at the pixel budget of the resolution (see [resolutions](resolutions.md)).
-In this version references cannot be combined with `init_image` or `mask`.
+References can be combined with `init_image` / `mask`, see below.
 
 ```bash
 uv run my-diffusion-generate "put the person from image 2 into the scene of image 1" --reference scene.png --reference person.png --aspect-ratio auto
@@ -111,6 +111,30 @@ only the margins are generated (a 16 px band along inner edges is blended in lat
 seam). After the VAE decode the original pixels are pasted back with an 8 px feathered seam, so the kept
 area is pixel-exact (resized to its box) except inside that seam. With two references the second
 one then only fits into the margins.
+
+## References together with `init_image` / `mask`
+
+`init_image` (image-to-image) or `init_image` + `mask` (inpaint) can be combined with `references`, as
+Wan2GP does with its control image. The init picture is **image 1** in the prompt and is also what is
+noised or inpainted; the references follow it as **image 2**. So the total is limited by `max_references`
+(2): with an init picture you can add one reference. Typical use: inpaint a region and bring in a person
+or object from a reference.
+
+```json
+{"prompt": "the person from image 2 stands in the masked area of image 1", "init_image": "<base64>", "mask": "<base64>", "references": ["<base64>"]}
+```
+
+```bash
+uv run my-diffusion-generate "the person from image 2 stands in the masked area of image 1" --init-image scene.png --mask mask.png --reference person.png
+```
+
+Rules (a bad combination is a clear 400 / CLI error before any model work):
+- `mask` still needs `init_image`; `strength` defaults as before (0.6 image-to-image, 1.0 inpaint).
+- `reference_mode` must be `scene` (the init picture is the scene); `outpaint` / `keep_original` cannot be
+  used with `init_image`.
+- Result size and crop follow the init picture exactly as without references (`aspect_ratio` / `auto`).
+- The edit LoRA is added as for any reference edit, and the edit size limits count the init picture too.
+- The result's `mode` stays `image2image` / `inpaint`; `references` counts only the references you sent.
 
 ## Background removal (`remove_background`)
 

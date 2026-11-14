@@ -60,7 +60,7 @@ class GenerateRequest(BaseModel):
     mask: str | None = Field(default=None, description="Base64 of a PNG: white = regenerate, black = keep. Needs init_image")
     feather: int = Field(default=2, ge=0, le=32, description="Softness of the mask edge, in latent pixels (1 latent pixel = 8 image pixels)")
 
-    # Reference editing. Cannot be combined with init_image / mask.
+    # Reference editing. With init_image the init picture is image 1 and these follow it.
     references: list[str] = Field(default_factory=list, description="Base64 PNG/JPEG reference pictures. Up to config max_references")
     reference_mode: str = Field(default="scene", pattern="^(scene|subjects)$", description="'scene': reference 1 is the main scene / landscape, the others are people or objects; 'subjects': all references are people or objects (aspect_ratio 'auto' is not allowed)")
     outpaint: OutpaintMargins | None = Field(default=None, description="Extend reference 1 by these percentages and generate the new area around it. Needs references in 'scene' mode; replaces aspect_ratio (the frame is reference 1 plus the margins at the resolution's pixel budget). All zeros = off")
