@@ -270,7 +270,8 @@
 
           <div style="display:flex;flex-direction:column;gap:8px;margin-top:auto">
             <div class="err" x-show="formError" x-text="formError"></div>
-            <button class="btn pri" style="min-height:48px;font-size:15px" @click="generate()" :disabled="submitting || !!apiDown" x-text="submitting ? 'Sending…' : 'Generate'"></button>
+            <button class="btn pri" style="min-height:48px;font-size:15px" @click="generate()" :disabled="submitting || !!apiDown || unloaded" x-text="submitting ? 'Sending…' : 'Generate'"></button>
+            <div class="warn" x-show="unloaded">The models are unloaded. Load them again in Settings → Models in memory.</div>
             <span class="sub" style="text-align:center">Goes to the queue; you can queue the next one right away</span>
           </div>
         </section>
@@ -321,9 +322,9 @@
                 <button class="btn dng" x-show="current.status === 'queued' || current.status === 'running'" :disabled="current.cancel_requested" @click="cancel(current.job_id)" x-text="current.cancel_requested ? 'Stopping…' : 'Cancel job'"></button>
                 <a class="btn" x-show="current.status === 'done'" :href="'#/job/' + current.job_id">Details</a>
               </div>
-              <div class="preview" :style="'aspect-ratio:' + aspect(shown || current)">
-                <img class="zoomable" :class="current.status !== 'done' && 'dim'" x-show="shown" :src="shown ? '/api/result/' + shown.job_id + '/image' : ''" alt="Result" title="Click for full screen" @click="lbOpen(shown.job_id)">
-                <span class="chip" x-show="shown && current.status !== 'done'" style="position:absolute;left:12px;top:12px;background:var(--bg)">Last picture</span>
+              <div class="preview" :style="'aspect-ratio:' + aspect(previewJob || current)">
+                <img class="zoomable" :class="current.status !== 'done' && 'dim'" x-show="previewJob" :src="previewJob ? '/api/result/' + previewJob.job_id + '/image' : ''" alt="Result" title="Click for full screen" @click="lbOpen(previewJob.job_id)">
+                <span class="chip" x-show="previewJob && current.status !== 'done'" style="position:absolute;left:12px;top:12px;background:var(--bg)">Last picture</span>
                 <div class="overlay" x-show="current.status === 'running' || current.status === 'queued'">
                   <div class="row"><span style="font-weight:600" x-text="current.status === 'running' ? 'Denoising' : 'Waiting in the queue'"></span><div class="grow"></div>
                     <span class="mono" x-text="current.status === 'running' ? 'step ' + (current.step || 0) + ' / ' + (current.total_steps || '?') + ' · ' + pct(current) + '%' : 'position ' + current.position"></span></div>
@@ -615,6 +616,23 @@
               </div>
             </template>
           </div>
+
+          <section class="sec" id="sec-memory" x-show="cfg">
+            <h2>Models in memory</h2>
+            <p class="lead">Unloading drops all the models from RAM and video memory on every GPU, so another program can use them. Generating and the prompt enhancer are off until the models are loaded again. Admins only; refused while jobs wait or run</p>
+            <div class="row wrap">
+              <span class="pill"><i class="dot" :style="{ background: statusPill.dot }"></i><span x-text="statusPill.text"></span></span>
+              <button class="btn" x-show="!unloaded" :disabled="memBusy || !ready" @click="memAsk = true">Unload models</button>
+              <button class="btn pri" x-show="unloaded" :disabled="memBusy" @click="loadModels()" x-text="memBusy ? 'Loading…' : 'Load models again'"></button>
+              <span class="sub" x-show="unloaded">Loads <span class="mono" x-text="stem((ckpt && ckpt.current) || (health && health.checkpoint))"></span> and starts the queue (takes a while).</span>
+              <span class="sub" x-show="!unloaded && !queueIdle && ready">Jobs are waiting or running: unloading is not possible now.</span>
+            </div>
+            <div class="note" x-show="memAsk" style="margin-top:8px">
+              <div>Unload all the models now? Loading them again takes about as long as a server start.</div>
+              <div class="row" style="margin-top:8px"><button class="btn sm dng" :disabled="memBusy" @click="unloadModels()">Unload</button><button class="btn sm" @click="memAsk = false">Cancel</button></div>
+            </div>
+            <div class="note" x-show="memNote" :class="memNote && memNote.bad ? 'bad' : 'good'" x-text="memNote && memNote.text"></div>
+          </section>
 
           <template x-for="g in groups" :key="g.id">
             <section class="sec" :id="'sec-' + g.id" x-show="items(g.id).length">

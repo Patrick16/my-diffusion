@@ -166,6 +166,7 @@ function app() {
     },
     loopHealth() { this.refreshHealth().finally(() => setTimeout(() => this.loopHealth(), this.activeJobs.length ? 3000 : 8000)); },
 
+    get unloaded() { return !!this.health && this.health.status === 'unloaded'; },
     get ready() { return this.health && this.health.status === 'ok'; },
     get queueIdle() {
       const q = this.health && this.health.queue;
@@ -176,6 +177,7 @@ function app() {
       if (!this.health) return { dot: '#9aa3b2', text: 'Connecting…' };
       const h = this.health;
       if (h.status === 'error') return { dot: '#ff9aa8', text: 'Models failed to load' };
+      if (h.status === 'unloaded') return { dot: '#9aa3b2', text: 'Models unloaded' };
       if (h.status === 'loading') return { dot: '#f5a35c', text: 'Models loading…' };
       const d = this.ckptDefaults();
       return { dot: '#5fd39a', text: `Models ready · ${this.stem(h.checkpoint)}${d ? ' · ' + d.steps + ' steps' : ''}` };
@@ -495,7 +497,7 @@ function app() {
       return f;
     },
     // The picture on the preview: the current job's own once it is done, until then the last finished one.
-    get shown() {
+    get previewJob() {
       if (this.current && this.current.status === 'done') return this.current;
       return this.jobList.filter(j => j.status === 'done').sort((a, b) => (b.finished_at || 0) - (a.finished_at || 0))[0] || null;
     },

@@ -111,6 +111,7 @@ slots = [
 ]
 
 _load_error: str | None = None
+_unloaded = False   # the models were dropped on purpose (POST /models/unload) and are not loading; /checkpoints/load brings them back
 scheduler: Scheduler | None = None   # created at startup (lifespan)
 inputs: InputFiles | None = None
 
@@ -344,6 +345,8 @@ def _scheduler() -> Scheduler:
 
 
 def _require_loaded() -> None:
+    if _unloaded:
+        raise HTTPException(503, "The models are unloaded; POST /checkpoints/load brings them back")
     if _load_error:
         raise HTTPException(500, f"Models failed to load: {_load_error}")
     if not _models_loaded():
@@ -380,7 +383,7 @@ async def _run(slot: Slot, func, *args, **kwargs):
 @app.get("/health", tags=["service"])
 async def health() -> dict:
     """Model loading state (loading / ok / error), the checkpoint, and the queue: waiting jobs and the GPU slots."""
-    status = "error" if _load_error else "ok" if _models_loaded() else "loading"
+    status = "unloaded" if _unloaded else "error" if _load_error else "ok" if _models_loaded() else "loading"
     queue = None
     if scheduler is not None:
         busy = scheduler.busy_slots()
@@ -418,8 +421,32 @@ async def checkpoints(caller: CallerDep) -> dict:
 @app.post("/checkpoints/load", tags=["models"], responses=_errors(401, 403, 404, 409, 503))
 async def load_checkpoint(request: LoadCheckpointRequest, caller: AdminDep) -> dict:
     """Switch the checkpoint on every GPU without restarting the server. Admins only. Refused while jobs are
-    waiting or running: a queued job must run on the checkpoint it was submitted for."""
-    _require_loaded()
+    waiting or running: a queued job must run on the checkpoint it was submitted for.
+
+    After `POST /models/unload` (or a failed load at start) this reads all the models again, with this
+    checkpoint, and starts the queue."""
+    global _unloaded
+    _scheduler()
+    if _unloaded or not _models_loaded():
+        try:
+            engine._inside(engine.settings.checkpoint_dir, request.name)   # a wrong name must not cost a full load
+        except Exception as exc:  # noqa: BLE001
+            raise _http_error(exc) from exc
+
+        def read(target: Krea2Engine) -> None:
+            with target._lock:
+                target.unload()   # whatever a failed load left behind
+                target.load(request.name)
+
+        _unloaded = False
+        _sync_load_state()   # "not loaded" and the queue paused until the reading ends
+        results = await asyncio.gather(*(_run(slot, read, engines[slot.name]) for slot in slots), return_exceptions=True)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            _sync_load_state(failures[0])
+            raise HTTPException(503, f"the models could not be loaded: {_error_text(failures[0])}") from failures[0]
+        _sync_load_state()   # clears the error and starts the queue
+        return {"current": engine.checkpoint_name, "kind": engine.kind}
     if not _scheduler().is_idle:
         raise HTTPException(409, "jobs are waiting or running; cancel them or wait until the queue is empty, then switch")
 
@@ -429,6 +456,38 @@ async def load_checkpoint(request: LoadCheckpointRequest, caller: AdminDep) -> d
 
     await asyncio.gather(*(_run(slot, switch, engines[slot.name]) for slot in slots))
     return {"current": engine.checkpoint_name, "kind": engine.kind}
+
+
+def _drop_models(target: Krea2Engine) -> None:
+    """On a slot's thread: the engine's models out of RAM, and the video memory its thread cached back to the driver."""
+    with target._lock:
+        target.unload()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 - the models are gone either way; this only returns cached video memory
+        logger.exception("could not empty the CUDA cache")
+
+
+@app.post("/models/unload", tags=["models"], responses=_errors(401, 403, 409, 503))
+async def unload_models(caller: AdminDep) -> dict:
+    """Drops all the models from RAM and video memory on every GPU, so another program can use them. Admins only.
+    Refused with `409` while jobs are waiting or running. Afterwards `/generate` answers `503` and `/health` says
+    `unloaded`; `POST /checkpoints/load` reads the models again (so does a `PATCH /config` that reloads them)."""
+    global _unloaded
+    _scheduler()
+    if _models_loaded() and not _scheduler().is_idle:
+        raise HTTPException(409, "jobs are waiting or running; cancel them or wait until the queue is empty, then unload")
+    # No await between the check and these two lines: no job can be queued in between.
+    _unloaded = True
+    scheduler.pause()
+    try:
+        await asyncio.shield(asyncio.gather(*(_run(slot, _drop_models, engines[slot.name]) for slot in slots)))
+    finally:
+        logger.info("models unloaded by %s", caller.owner)
+    return {"status": "unloaded"}
 
 
 @app.get("/loras", tags=["models"], responses=_errors(401))
@@ -615,6 +674,8 @@ async def generate(request: GenerateRequest, caller: CallerDep) -> JobInfo:
         pictures["mask"] = _decode_upload(request.mask, "mask")
     if request.references:
         pictures["references"] = [_decode_upload(value, f"references[{i}]") for i, value in enumerate(request.references)]
+    if _unloaded:
+        raise HTTPException(503, "The models are unloaded; POST /checkpoints/load brings them back")
     if _load_error:
         raise HTTPException(500, f"Models failed to load: {_load_error}")
     s = _scheduler()
@@ -819,10 +880,11 @@ def _sync_load_state(error: BaseException | None = None) -> None:
     """After the engines were touched: bring /health's error and the scheduler in line with whether the models
     are there. Models that failed to load at start and load now clear the error and start the queue; models
     lost by a failed reload set it and pause the queue."""
-    global _load_error
+    global _load_error, _unloaded
     if _models_loaded():
-        if _load_error is not None:
+        if _load_error is not None or _unloaded:
             _load_error = None
+            _unloaded = False
             if scheduler is not None:
                 scheduler.resume()
     elif error is not None or _load_error is None:

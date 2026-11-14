@@ -547,3 +547,45 @@ def test_the_baseline_survives_a_broken_environment(client, monkeypatch):
 def test_config_module_is_the_only_place_that_names_the_settings():
     # The endpoints get everything from the registry: a setting added to Settings appears without touching the API.
     assert set(api._API_ONLY) <= set(config.Settings.model_fields)
+
+
+# ---- unloading the models ---------------------------------------------------------------------------------------
+
+def test_unload_drops_the_models_and_load_brings_them_back(client, stage):
+    assert client.post("/models/unload").json() == {"status": "unloaded"}
+    assert [call[0] for call in stage.calls] == ["unload"]
+    health = client.get("/health").json()
+    assert health["status"] == "unloaded" and health["queue"]["paused"] is True
+    assert client.post("/generate", json={"prompt": "a cat"}).status_code == 503
+    assert client.post("/enhance-prompt", json={"prompt": "a cat"}).status_code == 503
+
+    stage.calls.clear()
+    assert client.post("/checkpoints/load", json={"name": "a.safetensors"}).json()["current"] == "a.safetensors"
+    assert stage.calls == [("unload",), ("load", "a.safetensors"), ("load_checkpoint", "a.safetensors")]   # the models come back with the named checkpoint
+    health = client.get("/health").json()
+    assert health["status"] == "ok" and health["queue"]["paused"] is False
+    assert client.post("/checkpoints/load", json={"name": "a.safetensors"}).status_code == 200
+
+
+def test_unload_is_refused_while_jobs_wait(client, stage, monkeypatch):
+    monkeypatch.setattr(type(api.scheduler), "is_idle", property(lambda self: False))
+    assert client.post("/models/unload").status_code == 409
+    assert stage.loaded and client.get("/health").json()["status"] == "ok"
+
+
+def test_a_failed_load_can_be_retried(client, stage):
+    client.post("/models/unload")
+    stage.fail.add("load")
+    response = client.post("/checkpoints/load", json={"name": "a.safetensors"})
+    assert response.status_code == 503 and "load failed" in response.json()["detail"]
+    assert client.get("/health").json()["status"] == "error"
+    stage.fail.clear()
+    assert client.post("/checkpoints/load", json={"name": "a.safetensors"}).status_code == 200
+    assert client.get("/health").json()["status"] == "ok"
+
+
+def test_unload_and_load_are_for_admins(secured):
+    assert secured.post("/models/unload", headers=bot(user="u1")).status_code == 403
+    assert secured.post("/checkpoints/load", json={"name": "a.safetensors"}, headers=bot(user="u1")).status_code == 403
+    assert secured.post("/models/unload", headers=WEB).status_code == 200
+    assert secured.post("/checkpoints/load", json={"name": "a.safetensors"}, headers=WEB).status_code == 200

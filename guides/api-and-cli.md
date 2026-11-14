@@ -25,7 +25,7 @@ four addresses.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /health` | `loading` / `ok` / `error`, the current checkpoint, the matmul mode, the attention kernel and the edit size policy (`edit_limits`, `edit_max_pixels`) |
+| `GET /health` | `loading` / `ok` / `error` / `unloaded`, the current checkpoint, the matmul mode, the attention kernel and the edit size policy (`edit_limits`, `edit_max_pixels`) |
 | `POST /generate` | queue a generation; answers at once (`202`) with the job id |
 | `GET /result/{job_id}` | the job: status, position in the queue, progress, result or error |
 | `GET /result/{job_id}/events` | the same job pushed as server-sent events, instead of polling ([details](job-queue.md#events-instead-of-polling)) |
@@ -40,6 +40,7 @@ All endpoints except `/health` and `/resolutions` need an API key once keys are 
 | `POST /enhance-prompt` | only rewrite the prompt |
 | `GET /resolutions` | table of sizes |
 | `GET /checkpoints`, `POST /checkpoints/load` | list and switch the checkpoint without a restart |
+| `POST /models/unload` | drop all the models from RAM and video memory (admins; refused while jobs wait or run); `/generate` answers `503` and `/health` says `unloaded` until `POST /checkpoints/load` reads the models back |
 | `GET /loras` | list of LoRAs |
 | `GET /config`, `PATCH /config` | admins: read and change the server's settings while it runs ([details](configuration.md#changing-settings-at-run-time)) |
 | `GET /fs` | admins: folders on the server, for choosing the model folders ([details](configuration.md#choosing-folders-get-fs)) |

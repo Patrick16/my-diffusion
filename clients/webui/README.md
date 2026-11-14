@@ -66,6 +66,7 @@ pictures can be loaded back from the server for 7 days.
   (`dry_run`), *Apply*, *Discard*; a refused value shows the server's message under its row, a row saved in the override
   file has *Reset*. Access (read-only) and a "waiting for restart" banner. The VAE and the background-removal model are
   plain text fields: `GET /fs` lists folders, not files.
+- **Models in memory** (Settings): *Unload models* (`POST /models/unload`, with a confirmation; refused by the server while jobs wait or run) frees RAM and video memory for other programs. The top bar then says "Models unloaded", Generate and Enhance are off, and *Load models again* (`POST /checkpoints/load` with the current checkpoint) brings them back.
 - **This web UI**: where it listens (this computer / local network / custom, saved for the next start of the web UI),
   live events or polling, gallery page size, remembering the Create form, and the defaults of that form.
 

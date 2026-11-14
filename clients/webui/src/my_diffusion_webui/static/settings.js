@@ -150,6 +150,23 @@ function settingsMixin() {
     // Some settings change what the Create page shows (checkpoints, LoRAs, how many references fit).
     async afterConfigChange() { await this.refreshHealth(); await this.loadReference(); },
 
+    // ---------------------------------------------------------------- models in memory: POST /models/unload, and back with /checkpoints/load
+    memBusy: false, memAsk: false, memNote: null,
+    async unloadModels() {
+      this.memBusy = true; this.memNote = null; this.memAsk = false;
+      try { await this.api('models/unload', { method: 'POST' }); this.memNote = { bad: false, text: 'The models are out of RAM and video memory. Generating is off until they are loaded again.' }; }
+      catch (e) { this.memNote = { bad: true, text: e.status === 409 ? 'Not now: jobs are waiting or running. Cancel them or wait for the queue to empty. (' + e.message + ')' : e.message }; }
+      await this.refreshHealth(); this.memBusy = false;
+    },
+    async loadModels() {
+      const name = (this.ckpt && this.ckpt.current) || (this.health && this.health.checkpoint);
+      if (!name) { this.memNote = { bad: true, text: 'No checkpoint is known: choose one in the Models settings and apply.' }; return; }
+      this.memBusy = true; this.memNote = null;
+      try { await this.api('checkpoints/load', { method: 'POST', body: { name } }); this.memNote = { bad: false, text: 'Models loaded: ' + this.stem(name) }; await this.loadReference(); }
+      catch (e) { this.memNote = { bad: true, text: e.message }; }
+      await this.refreshHealth(); this.memBusy = false;
+    },
+
     // ---------------------------------------------------------------- file pickers on a setting row
     openFilePick(s) {
       if (this.spick && this.spick.name === s.name) { this.spick = null; return; }
