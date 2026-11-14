@@ -6,7 +6,7 @@ command line.
 
 ## Features
 
-- **Text-to-image** with frame resolution (480 / 720 / 1080) and aspect ratio
+- **Text-to-image** with frame resolution (480 / 720 / 1080 / 1440) and aspect ratio
 - **Image-to-image** and **inpaint** with a mask
 - **Reference editing**: one or two reference pictures, scene or subjects mode
 - **Outpainting**: extend a picture on any side, optionally keeping the original pixels
@@ -81,7 +81,7 @@ Reference editing also needs the edit LoRA `krea2_identity_edit_v1_2` in `models
 
 | Area | Support |
 |---|---|
-| Resolutions | 480, 720, 1080 pixel budget; 16:9, 4:3, 3:2, 21:9, 1:1 and portrait variants ([details](guides/resolutions.md)) |
+| Resolutions | 480, 720, 1080, 1440 pixel budget; 16:9, 4:3, 3:2, 21:9, 1:1 and portrait variants ([details](guides/resolutions.md)) |
 | Checkpoints | mxfp8, float8_e4m3fn, int8 tensorwise, bare fp8, GGUF q8_0; turbo and raw kinds ([details](guides/checkpoints.md)) |
 | LoRA | Standard LoRA files with 7 key naming schemes; LoKr/LoHa not supported ([details](guides/loras.md)) |
 | Modes | text-to-image, image-to-image, inpaint, reference editing, outpainting, background removal ([details](guides/image-modes.md)) |

@@ -69,7 +69,7 @@ uv run my-diffusion-generate "a fox in the snow, golden hour" --resolution 720 -
 
 | Flag | Meaning |
 |---|---|
-| `--resolution {480,720,1080}` | size tier, default `720` |
+| `--resolution {480,720,1080,1440}` | size tier, default `720` |
 | `--aspect-ratio` | one of the ratios in [resolutions](resolutions.md), or `auto` (with `--reference`, scene mode); default `16:9` |
 | `--seed`, `--count` | seed; `--count N` makes N images, the seed grows by 1 each time |
 | `--steps`, `--guidance-scale` | override the defaults of the checkpoint kind |

@@ -9,7 +9,7 @@ and solve the system: width*height = budget, width/height = aspect_ratio.
 
 So all formats on one tier get the same "weight" for the GPU
 (the same number of latent tokens), while the tiers remain intuitive
-numbers 480/720/1080.
+numbers 480/720/1080/1440.
 
 The sides must be multiples of 16: the VAE compresses the image 8 times per side, and the network
 cuts the latent into 2x2 patches (8 * 2 = 16). Therefore both sides are rounded to the
@@ -66,7 +66,7 @@ def max_pixels(tier: str) -> int:
 
 
 def resolve_dimensions(tier: str, aspect_ratio: str) -> Dimensions:
-    """tier ('480'|'720'|'1080') + aspect_ratio ('16:9', ...) -> (width, height).
+    """tier ('480'|'720'|'1080'|'1440') + aspect_ratio ('16:9', ...) -> (width, height).
 
     The frame area is preserved within one tier; the sides are multiples of 16."""
     if tier not in RESOLUTION_TIERS:
