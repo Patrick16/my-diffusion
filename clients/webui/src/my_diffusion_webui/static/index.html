@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>my-diffusion</title>
+<link rel="stylesheet" href="/static/app.css">
+<!-- Alpine.js, pinned to an exact version and checked by its hash. Scripts run in this order (defer keeps it). -->
+<script defer src="/static/pictures.js"></script>
+<script defer src="/static/mask.js"></script>
+<script defer src="/static/settings.js"></script>
+<script defer src="/static/app.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"
+        integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F" crossorigin="anonymous"></script>
+</head>
+<body>
+<div class="app" x-data="app()" x-cloak>
+
+  <header class="top">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8ab4ff" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 17v4M17 19h4"/></svg>
+      my-diffusion
+    </div>
+    <span class="pill"><i class="dot" :style="'background:' + statusPill.dot"></i><span x-text="statusPill.text"></span></span>
+    <span class="pill" x-show="queuePill"><i class="dot" :style="'background:' + (queuePill && queuePill.dot)"></i><span x-text="queuePill && queuePill.text"></span></span>
+    <div class="grow"></div>
+    <span class="pill" x-text="'Server ' + conn.api_url"></span>
+    <span class="pill" x-text="'web' + (conn.user_id ? ':' + conn.user_id : '') + (conn.has_key ? '' : ' · no key')"></span>
+  </header>
+
+  <div class="body">
+    <nav class="nav" aria-label="Main">
+      <a class="navi" :class="route.page === 'create' && 'on'" href="#/create">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg>Create</a>
+      <a class="navi" :class="(route.page === 'gallery' || route.page === 'job') && 'on'" href="#/gallery">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Gallery</a>
+      <a class="navi" :class="route.page === 'settings' && 'on'" href="#/settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>Settings</a>
+      <div class="grow"></div>
+      <div class="sub" style="padding:0 12px">Requests go to the API of this project. Pictures stay on the server.</div>
+    </nav>
+
+    <div class="grow" style="min-width:0;display:flex;flex-direction:column">
+      <div class="banner" x-show="apiDown && route.page !== 'settings'" style="margin:16px 24px 0">
+        <span x-text="apiDown"></span><a class="btn sm" href="#/settings">Connection settings</a>
+      </div>
+
+      <!-- ============================================================ CREATE -->
+      <main class="main" x-show="route.page === 'create'">
+        <section class="panel" aria-label="Controls">
+          <div>
+            <p class="lbl">Model (checkpoint)</p>
+            <button class="btn" style="width:100%;justify-content:space-between" :style="picker === 'checkpoint' ? { borderColor: 'var(--accent)' } : {}" @click="openPicker('checkpoint')">
+              <span class="mono" x-text="stem(ckpt.current || (health && health.checkpoint)) || '—'"></span>
+              <span class="sub" x-text="(health && health.kind ? health.kind : '') + (ckptDefaults() ? ' · ' + ckptDefaults().steps + ' steps · cfg ' + ckptDefaults().guidance_scale : '') + ' ▾'"></span>
+            </button>
+            <div class="picker" x-show="picker === 'checkpoint'">
+              <input class="field" placeholder="Filter files" x-model="pickFilter" aria-label="Filter checkpoints">
+              <div class="sub mono">models/checkpoints (on the server)</div>
+              <div class="tree">
+                <template x-for="row in pickerRows()" :key="row.kind + (row.path || row.name)">
+                  <button class="node" :class="row.kind === 'file' && row.name === ckpt.current && 'sel'" :style="'padding-left:' + (8 + row.depth * 18) + 'px'"
+                          @click="row.kind === 'dir' ? toggleDir(row.path) : null">
+                    <span class="mark" x-text="row.kind === 'dir' ? (row.open ? '▾' : '▸') : (row.name === ckpt.current ? '●' : '○')"></span>
+                    <span class="grow" :style="row.kind === 'dir' && 'font-weight:500;color:var(--soft)'" x-text="row.label"></span>
+                    <span class="sub" x-text="row.hint || ''"></span>
+                    <span class="btn sm" x-show="row.kind === 'file' && row.name !== ckpt.current" :class="!queueIdle && 'off'" style="min-height:28px"
+                          @click.stop="switchCheckpoint(row.name)" x-text="ckptBusy ? '…' : 'Switch'"></span>
+                  </button>
+                </template>
+              </div>
+              <div class="sub" style="line-height:1.45">One model at a time. Switching reloads it on every GPU (admins only) and is possible only when the queue is empty<span x-show="!queueIdle"> — jobs are active now, so the switch is not possible</span>.</div>
+            </div>
+          </div>
+
+          <div>
+            <p class="lbl">Mode</p>
+            <div class="seg">
+              <template x-for="m in modes" :key="m"><button :class="mode === m && 'on'" @click="mode = m; formError = ''" x-text="m"></button></template>
+            </div>
+          </div>
+
+          <!-- ---- input pictures: what each mode needs ---- -->
+          <div x-show="slotDefs.length" class="stack g14">
+            <p class="sub" style="margin:0;line-height:1.5" x-show="mode === 'Edit'">Up to <span x-text="maxRefs"></span> references. Refer to them in the prompt as image 1 and image 2.</p>
+            <p class="sub" style="margin:0;line-height:1.5" x-show="mode === 'Outpaint'">Outpainting works through references: the picture to extend is reference 1 (scene mode).</p>
+            <p class="sub" style="margin:0;line-height:1.5" x-show="mode === 'Inpaint'">The init picture counts as image 1, so with <span x-text="maxRefs"></span> references allowed by the server <span x-text="maxRefs - 1"></span> more fit. Refer to it as image 2.</p>
+            <template x-for="slot in slotDefs" :key="slot.id">
+              <div @mouseenter="activeSlot = slot.id" @dragover.prevent @drop="onDrop(slot.id, $event)">
+                <p class="lbl" x-text="slot.label + (slot.required ? '' : '')"></p>
+                <div x-show="pics[slot.id]" class="slotpic">
+                  <img :src="pics[slot.id] && pics[slot.id].url" alt="">
+                  <span class="chip" style="position:absolute;left:8px;top:8px;background:var(--bg);color:#fff" x-text="slot.tag + (pics[slot.id] ? ' · ' + pics[slot.id].w + ' × ' + pics[slot.id].h : '')"></span>
+                  <button class="btn" aria-label="Remove picture" style="position:absolute;right:6px;top:6px;min-height:32px;width:32px;padding:0;background:var(--bg)" @click="clearPicture(slot.id)">×</button>
+                  <template x-if="mode === 'Img2img' && slot.id === 'init' && cropFrame(pics.init, ratio)"><div class="cropframe" :style="frameStyle(cropFrame(pics.init, ratio))"></div></template>
+                </div>
+                <div class="drop" x-show="!pics[slot.id]">
+                  <span>Drop or paste a picture</span>
+                  <div class="row wrap" style="justify-content:center">
+                    <label class="btn sm">Choose file<input type="file" accept="image/*" hidden @change="fileChosen(slot.id, $event)"></label>
+                    <button class="btn sm" @click="openGalleryPick(slot.id)">From the gallery</button>
+                  </div>
+                </div>
+                <p class="sub" style="margin:6px 0 0" x-show="mode === 'Img2img' && slot.id === 'init'">The dashed frame is the part kept when the picture is cropped to <span x-text="ratio"></span>.</p>
+              </div>
+            </template>
+          </div>
+
+          <!-- ---- Img2img ---- -->
+          <div x-show="mode === 'Img2img'">
+            <p class="lbl">Strength</p>
+            <div class="row"><input type="range" min="0.05" max="1" step="0.05" x-model.number="form.strengthI2I" aria-label="Strength"><span class="mono" style="width:40px;text-align:right" x-text="Number(form.strengthI2I).toFixed(2)"></span></div>
+            <div class="row sub" style="justify-content:space-between;margin-top:6px"><span>0.1 stays close</span><span>1.0 same as text to image</span></div>
+          </div>
+
+          <!-- ---- Inpaint ---- -->
+          <div x-show="mode === 'Inpaint' || (mode === 'Edit' && form.editInside)" class="stack g18">
+            <div>
+              <p class="lbl">Mask</p>
+              <p class="sub" style="margin:0 0 10px;line-height:1.5">Paint on the picture on the right. White area is regenerated, the rest is kept. Or load a mask PNG.</p>
+              <div class="row wrap">
+                <label class="btn sm">Load mask PNG<input type="file" accept="image/*" hidden @change="maskFileChosen($event)"></label>
+                <button class="btn sm" @click="maskClear()">Clear</button>
+                <button class="btn sm" @click="maskInvert()">Invert</button>
+              </div>
+            </div>
+            <div>
+              <p class="lbl">Feather: edge softness</p>
+              <div class="row"><input type="range" min="0" max="32" step="1" x-model.number="form.feather" aria-label="Feather"><span class="mono" style="width:90px;text-align:right" x-text="form.feather + ' · ' + form.feather * 8 + ' px'"></span></div>
+              <p class="sub" style="margin:6px 0 0">1 latent pixel is 8 image pixels. Range 0 to 32</p>
+            </div>
+            <div>
+              <p class="lbl">Strength</p>
+              <div class="row"><input type="range" min="0.05" max="1" step="0.05" x-model.number="form.strengthInp" aria-label="Strength"><span class="mono" style="width:40px;text-align:right" x-text="Number(form.strengthInp).toFixed(2)"></span></div>
+              <p class="sub" style="margin:6px 0 0">Default for inpaint is 1.0: the masked area starts from pure noise</p>
+            </div>
+            <div>
+              <p class="lbl">Refinement iterations</p>
+              <div class="seg"><template x-for="n in [0, 2, 3, 4, 5]" :key="n"><button :class="form.iters === n && 'on'" @click="form.iters = n" x-text="n"></button></template></div>
+              <p class="sub" style="margin:8px 0 0;line-height:1.5">0 fills a hole with background or removes an object. 2 completes a part of an object from the kept part (a cut fox gets a clean second half); sampling takes about 2.5 times longer. 3 to 5 measured no better than 2</p>
+            </div>
+          </div>
+
+          <!-- ---- Edit ---- -->
+          <div x-show="mode === 'Edit'" class="stack g14">
+            <div>
+              <p class="lbl">Reference mode</p>
+              <div class="seg"><button :class="form.refMode === 'scene' && 'on'" @click="form.refMode = 'scene'">Scene</button><button :class="form.refMode === 'subjects' && 'on'" @click="form.refMode = 'subjects'; form.editInside = false">Subjects</button></div>
+              <p class="sub" style="margin:8px 0 0;line-height:1.5">Scene: image 1 is the frame, the others are people or objects. Subjects: all are people or objects, no scene</p>
+              <label class="row" style="margin-top:10px;gap:8px"><input type="checkbox" x-model="form.cutBg"> <span>Cut the background out of subjects</span></label>
+            </div>
+            <label class="row" style="gap:8px;align-items:flex-start" x-show="form.refMode === 'scene'"><input type="checkbox" x-model="form.editInside" style="margin-top:2px"> <span>Edit inside image 1 only<br><span class="sub">Image 1 also becomes the init picture: paint a mask on it and only that part is regenerated. One reference fewer than the server allows</span></span></label>
+          </div>
+
+          <!-- ---- Outpaint ---- -->
+          <div x-show="mode === 'Outpaint'" class="stack g14">
+            <div>
+              <p class="lbl">Extend by, % of the picture size</p>
+              <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;align-items:end">
+                <span></span><label class="sub">Top<input class="field mono" inputmode="decimal" x-model="form.margins.top"></label><span></span>
+                <label class="sub">Left<input class="field mono" inputmode="decimal" x-model="form.margins.left"></label>
+                <div style="border:1px dashed var(--line3);border-radius:8px;min-height:40px"></div>
+                <label class="sub">Right<input class="field mono" inputmode="decimal" x-model="form.margins.right"></label>
+                <span></span><label class="sub">Bottom<input class="field mono" inputmode="decimal" x-model="form.margins.bottom"></label><span></span>
+              </div>
+              <p class="sub" style="margin:8px 0 0">0 to 300 on each side. All zeros turns outpainting off</p>
+            </div>
+            <label class="row" style="gap:8px;align-items:flex-start"><input type="checkbox" x-model="form.keepOriginal" style="margin-top:2px"> <span>Keep original pixels<br><span class="sub">Only the margins are generated. Off: the model may lightly redraw the original too</span></span></label>
+            <label class="row" style="gap:8px" x-show="pics.op1"><input type="checkbox" x-model="form.outCutBg"> <span>Cut the background out of the second reference</span></label>
+          </div>
+
+          <div>
+            <p class="lbl">Prompt</p>
+            <textarea class="field" rows="7" aria-label="Prompt" x-model="form.prompt" placeholder="Describe the picture"></textarea>
+            <div class="row wrap" style="margin-top:8px">
+              <button class="btn sm" @click="enhance()" :disabled="enhancing || !ready" x-text="enhancing ? 'Enhancing…' : 'Enhance prompt'"></button>
+              <button class="btn sm" @click="undoEnhance()" x-show="beforeEnhance !== null">Undo enhance</button>
+            </div>
+            <p class="sub" style="margin:8px 0 0;line-height:1.5">Enhance rewrites the idea with the text model (a few seconds, not queued). Your own text stays above as a comment: lines starting with # are not sent. Edit the new text freely before generating</p>
+          </div>
+
+          <div>
+            <p class="lbl">Negative prompt</p>
+            <input class="field" aria-label="Negative prompt" x-model="form.negative" placeholder="Used only on raw checkpoints (guidance above 1)">
+          </div>
+
+          <div>
+            <p class="lbl" x-text="mode === 'Outpaint' ? 'Resolution' : 'Size'"></p>
+            <div class="seg" style="margin-bottom:10px">
+              <template x-for="t in tiers" :key="t"><button :class="form.resolution === t && 'on'" @click="form.resolution = t" x-text="t"></button></template>
+            </div>
+            <div class="ratios" x-show="showRatios">
+              <template x-for="r in ratios" :key="r"><button class="ratio" :class="ratio === r && 'on'" @click="form.ratio = r"><i :style="ratioBox(r)"></i><span x-text="r === 'auto' ? 'Auto' : r"></span></button></template>
+            </div>
+            <p class="sub" style="margin:8px 0 0;line-height:1.5">
+              <span x-show="sizeNow">Output about <span class="mono" x-text="sizeNow"></span>; sides are multiples of 16.</span>
+              <span x-show="mode === 'Outpaint'"> Aspect ratio is not used: the frame is the picture plus the margins.</span>
+              <span x-show="mode === 'Edit' && ratio === 'auto'"> Auto takes the exact proportions of image 1.</span>
+              <span x-show="mode === 'Img2img' || mode === 'Inpaint'"> The picture is cropped to the ratio first.</span>
+            </p>
+            <div class="warn" style="margin-top:8px" x-show="editWarning" x-text="editWarning"></div>
+          </div>
+
+          <div>
+            <p class="lbl">Seed</p>
+            <div class="row">
+              <input class="field mono" aria-label="Seed" x-model="form.seed" placeholder="random" inputmode="numeric">
+              <button class="btn" @click="dice()" aria-label="Random seed" title="Random seed">🎲</button>
+              <label class="row" style="gap:6px"><input type="checkbox" x-model="form.lockSeed"><span class="sub">Lock</span></label>
+            </div>
+          </div>
+
+          <div>
+            <p class="lbl">LoRA</p>
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <div x-show="editLoraVisible">
+                <div class="row">
+                  <span class="chip" style="border-color:var(--accent);color:#dbe6ff">auto</span>
+                  <span class="mono grow" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="editLora" x-text="editLora"></span>
+                  <input type="range" min="0" max="2" step="0.05" style="flex:0 0 80px" :value="editLoraShown" :disabled="form.editLoraOff" @input="form.editLoraWeight = Number($event.target.value)" aria-label="Edit LoRA weight">
+                  <span class="mono" style="width:32px;text-align:right" x-text="Number(editLoraShown).toFixed(1)"></span>
+                  <button class="btn sm" :aria-label="form.editLoraOff ? 'Switch on again' : 'Switch off for this request'" @click="form.editLoraOff = !form.editLoraOff" x-text="form.editLoraOff ? '↺' : '×'"></button>
+                </div>
+                <p class="sub" style="margin:6px 0 0;line-height:1.5">The edit LoRA of the server settings, used for every request with references. Change its weight for this request only, or switch it off with ×, which sends weight 0. The row is not sent while you leave it as it is, so the server setting stays the single source</p>
+              </div>
+              <template x-for="(l, i) in form.loras" :key="l.name">
+                <div class="row">
+                  <span style="flex:0 0 120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="l.name" x-text="l.name"></span>
+                  <input type="range" min="-2" max="2" step="0.05" x-model.number="l.weight" :aria-label="'Weight of ' + l.name">
+                  <span class="mono" style="width:40px;text-align:right" x-text="Number(l.weight).toFixed(2)"></span>
+                  <button class="btn sm" aria-label="Remove LoRA" @click="form.loras.splice(i, 1)">×</button>
+                </div>
+              </template>
+              <button class="btn sm" style="align-self:flex-start" :style="picker === 'lora' ? { borderColor: 'var(--accent)' } : {}" @click="openPicker('lora')">+ Add LoRA</button>
+              <div class="picker" x-show="picker === 'lora'">
+                <input class="field" placeholder="Filter files" x-model="pickFilter" aria-label="Filter LoRA files">
+                <div class="sub mono">models/loras (on the server)</div>
+                <div class="tree">
+                  <template x-for="row in pickerRows()" :key="row.kind + (row.path || row.name)">
+                    <button class="node" :class="row.kind === 'file' && loraAdded(row.name) && 'off'" :style="'padding-left:' + (8 + row.depth * 18) + 'px'"
+                            @click="row.kind === 'dir' ? toggleDir(row.path) : pickFile(row)">
+                      <span class="mark" style="color:var(--muted)" x-text="row.kind === 'dir' ? (row.open ? '▾' : '▸') : ''"></span>
+                      <span class="grow" :style="row.kind === 'dir' && 'font-weight:500;color:var(--soft)'" x-text="row.label"></span>
+                      <span class="sub" x-text="row.kind === 'file' && loraAdded(row.name) ? 'already added' : (row.hint || '')"></span>
+                    </button>
+                  </template>
+                  <div class="sub" x-show="!loraFiles.length" style="padding:8px">No LoRA files found on the server.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <details>
+            <summary>Advanced: steps, guidance, schedule</summary>
+            <div style="display:flex;flex-direction:column;gap:12px;margin-top:10px">
+              <div class="row"><span style="flex:0 0 120px">Steps</span>
+                <input type="range" min="1" max="60" x-model.number="form.steps" :disabled="form.steps === null" aria-label="Steps">
+                <span class="mono" style="width:44px;text-align:right" x-text="form.steps === null ? 'auto' : form.steps"></span>
+                <input type="checkbox" :checked="form.steps === null" @change="form.steps = $event.target.checked ? null : (ckptDefaults() ? ckptDefaults().steps : 8)" title="Automatic (the checkpoint's default)"></div>
+              <div class="row"><span style="flex:0 0 120px">Guidance (CFG)</span>
+                <input type="range" min="1" max="12" step="0.1" x-model.number="form.cfg" :disabled="form.cfg === null" aria-label="Guidance">
+                <span class="mono" style="width:44px;text-align:right" x-text="form.cfg === null ? 'auto' : Number(form.cfg).toFixed(1)"></span>
+                <input type="checkbox" :checked="form.cfg === null" @change="form.cfg = $event.target.checked ? null : (ckptDefaults() ? ckptDefaults().guidance_scale : 1)" title="Automatic (the checkpoint's default)"></div>
+              <div class="row"><span style="flex:0 0 120px">CFG from</span><input type="range" min="0" max="1" step="0.05" x-model.number="form.cfgStart" aria-label="CFG start"><span class="mono" style="width:44px;text-align:right" x-text="Number(form.cfgStart).toFixed(2)"></span></div>
+              <div class="row"><span style="flex:0 0 120px">CFG until</span><input type="range" min="0" max="1" step="0.05" x-model.number="form.cfgEnd" aria-label="CFG end"><span class="mono" style="width:44px;text-align:right" x-text="Number(form.cfgEnd).toFixed(2)"></span></div>
+              <div class="row"><span style="flex:0 0 120px">Shift</span><input class="field mono" x-model="form.shift" placeholder="auto from image size" inputmode="decimal"></div>
+              <div class="sub">The tick box means automatic: the checkpoint's own steps and guidance.</div>
+            </div>
+          </details>
+
+          <div style="display:flex;flex-direction:column;gap:8px;margin-top:auto">
+            <div class="err" x-show="formError" x-text="formError"></div>
+            <button class="btn pri" style="min-height:48px;font-size:15px" @click="generate()" :disabled="submitting || !!apiDown" x-text="submitting ? 'Sending…' : 'Generate'"></button>
+            <span class="sub" style="text-align:center">Goes to the queue; you can queue the next one right away</span>
+          </div>
+        </section>
+
+        <section class="stage" aria-label="Result">
+          <!-- mask editor: Inpaint, or Edit inside image 1 -->
+          <div x-show="maskSlot" class="stack g12">
+            <div class="row wrap"><h1 style="margin:0;font-size:18px;font-weight:600">Mask editor</h1><div class="grow"></div><span class="sub" x-show="maskPic">Dashed frame: the crop that will be generated</span></div>
+            <div class="sub" x-show="!maskPic">Add the picture first (left), then paint the area to regenerate here.</div>
+            <div x-show="maskPic" class="stack g12">
+              <div class="row wrap" style="padding:8px;background:var(--bg2);border:1px solid var(--line);border-radius:12px">
+                <button class="btn sm" :class="mask.tool === 'brush' && 'pri'" @click="mask.tool = 'brush'">Brush</button>
+                <button class="btn sm" :class="mask.tool === 'eraser' && 'pri'" @click="mask.tool = 'eraser'">Eraser</button>
+                <button class="btn sm" :class="mask.tool === 'rect' && 'pri'" @click="mask.tool = 'rect'">Rectangle</button>
+                <div class="row grow" style="flex:1 1 200px"><span class="sub">Size</span><input type="range" min="4" :max="maskPic ? Math.max(64, Math.round(Math.min(maskPic.w, maskPic.h) / 2)) : 400" x-model.number="mask.size" aria-label="Brush size"><span class="mono" x-text="mask.size + ' px'"></span></div>
+                <button class="btn sm" :disabled="!mask.canUndo" @click="maskUndo()">Undo</button>
+                <button class="btn sm" :disabled="!mask.canRedo" @click="maskRedo()">Redo</button>
+                <label class="row" style="gap:6px"><input type="checkbox" x-model="mask.show" @change="maskDraw()"><span class="sub">Show mask</span></label>
+              </div>
+              <div class="maskbox" :style="maskPic ? { aspectRatio: maskPic.w + '/' + maskPic.h } : {}">
+                <img class="fill" :src="maskPic && maskPic.url" alt="">
+                <template x-if="cropFrame(maskPic, ratio)"><div class="cropframe" :style="frameStyle(cropFrame(maskPic, ratio))"></div></template>
+                <canvas class="fill maskview" x-ref="maskView" x-effect="maskSetup(maskPic, $refs.maskView)"
+                        @pointerdown="maskDown($event)" @pointermove="maskMove($event)" @pointerup="maskUp()" @pointercancel="maskUp()" @pointerleave="maskLeave()"></canvas>
+                <span class="chip" style="position:absolute;left:12px;top:12px;background:var(--bg);color:#fff;pointer-events:none;line-height:1.4">White = regenerate</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- outpaint: where the original sits in the new frame -->
+          <div x-show="mode === 'Outpaint'" class="stack g10">
+            <div class="row wrap"><h1 style="margin:0;font-size:18px;font-weight:600">Frame preview</h1><div class="grow"></div><span class="chip mono" x-show="outFrame && outFrame.size" x-text="outFrame && outFrame.size ? 'output about ' + outFrame.size.w + ' × ' + outFrame.size.h : ''"></span></div>
+            <div class="sub" x-show="!outFrame">Add the picture to extend (left) to see the new frame.</div>
+            <div x-show="outFrame" class="framebox" :style="outFrame ? { aspectRatio: String(outFrame.aspect) } : {}">
+              <img class="inframe" :src="pics.op0 && pics.op0.url" alt="" :style="outFrame ? { left: outFrame.box.x * 100 + '%', top: outFrame.box.y * 100 + '%', width: outFrame.box.w * 100 + '%', height: outFrame.box.h * 100 + '%' } : {}">
+              <span class="chip" style="position:absolute;left:8px;top:8px;background:var(--bg);line-height:1.4">Original</span>
+              <span class="chip" style="position:absolute;right:8px;bottom:8px;background:var(--bg);line-height:1.4">New area is generated</span>
+            </div>
+          </div>
+
+          <template x-if="current">
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div class="row wrap">
+                <h1 style="margin:0;font-size:18px;font-weight:600">Current job</h1>
+                <span class="pill" :style="'color:' + statusColor(current.status)"><i class="dot" :style="'background:' + statusColor(current.status)"></i>
+                  <span x-text="current.status === 'running' ? 'running' + (current.slot ? ' on ' + current.slot : '') : current.status === 'queued' ? 'waiting · position ' + current.position : current.status"></span></span>
+                <div class="grow"></div>
+                <button class="btn dng" x-show="current.status === 'queued' || current.status === 'running'" :disabled="current.cancel_requested" @click="cancel(current.job_id)" x-text="current.cancel_requested ? 'Stopping…' : 'Cancel job'"></button>
+                <a class="btn" x-show="current.status === 'done'" :href="'#/job/' + current.job_id">Details</a>
+              </div>
+              <div class="preview" :style="'aspect-ratio:' + aspect(current)">
+                <img x-show="current.status === 'done'" :src="current.status === 'done' ? '/api/result/' + current.job_id + '/image' : ''" alt="Result">
+                <div class="overlay" x-show="current.status === 'running' || current.status === 'queued'">
+                  <div class="row"><span style="font-weight:600" x-text="current.status === 'running' ? 'Denoising' : 'Waiting in the queue'"></span><div class="grow"></div>
+                    <span class="mono" x-text="current.status === 'running' ? 'step ' + (current.step || 0) + ' / ' + (current.total_steps || '?') + ' · ' + pct(current) + '%' : 'position ' + current.position"></span></div>
+                  <div class="bar"><i :style="'width:' + (current.status === 'running' ? pct(current) : 0) + '%'"></i></div>
+                  <span class="sub">The preview appears when the job is done; a running job stops at its next step when cancelled</span>
+                </div>
+                <div class="overlay" x-show="current.status === 'failed'"><span class="err" x-text="current.error"></span></div>
+                <div class="overlay" x-show="current.status === 'cancelled'"><span>Cancelled</span></div>
+              </div>
+              <div class="row wrap" style="gap:8px">
+                <span class="chip mono" x-show="current.result" x-text="current.result && current.result.width + ' × ' + current.result.height"></span>
+                <span class="chip" x-text="modeOf(current)"></span>
+                <template x-for="l in (current.params.loras || [])" :key="l.name"><span class="chip" x-text="'LoRA ' + l.name + ' · ' + l.weight"></span></template>
+                <span class="chip mono" x-text="'seed ' + (current.result ? current.result.seed : (current.params.seed ?? 'random'))"></span>
+                <span class="chip" x-show="current.status === 'running'" x-text="'started ' + ago(current.started_at)"></span>
+                <span class="chip" x-show="current.status === 'done'" x-text="seconds(current)"></span>
+              </div>
+              <div x-show="Object.keys(current.inputs || {}).length" class="row wrap" style="gap:10px;align-items:flex-start">
+                <template x-for="[name, url] in kv(current.inputs)" :key="current.job_id + name">
+                  <figure style="margin:0;position:relative;width:120px"><img class="thumb" loading="lazy" :src="'/api' + url" :alt="name" @error="$el.closest('figure').remove()"><span class="chip" style="position:absolute;left:4px;top:4px;padding:2px 6px;font-size:11px;background:var(--bg)" x-text="name"></span></figure>
+                </template>
+                <span class="sub" style="flex:1 1 200px;align-self:center">Pictures sent with this job, loaded from the server (kept 7 days).</span>
+              </div>
+              <div class="err" x-show="current.warnings && current.warnings.length"><template x-for="w in current.warnings"><div x-text="w"></div></template></div>
+            </div>
+          </template>
+          <div x-show="!current" class="sub" style="padding:40px 0;text-align:center">Nothing generated yet. Write a prompt and press Generate.</div>
+
+          <div x-show="waitingJobs.length">
+            <p class="lbl">Waiting in the queue</p>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <template x-for="j in waitingJobs" :key="j.job_id">
+                <div class="qitem">
+                  <span class="mono" style="color:var(--accent)" x-text="'#' + j.position"></span>
+                  <span style="flex:1 1 160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" x-text="j.params.prompt"></span>
+                  <span class="chip mono" x-text="j.owner"></span>
+                  <span class="sub" x-text="modeOf(j) + ' · ' + j.params.resolution"></span>
+                  <button class="btn sm" @click="reuse(j, false)" title="Copy settings and pictures to the form">Copy to form</button>
+                  <button class="btn sm" @click="cancel(j.job_id)">Cancel</button>
+                </div>
+              </template>
+            </div>
+          </div>
+        </section>
+
+        <aside class="hist" aria-label="Recent">
+          <p class="lbl" style="margin:0">Recent</p>
+          <template x-for="j in recent" :key="j.job_id">
+            <a :href="'#/job/' + j.job_id" style="display:flex;flex-direction:column;gap:4px;text-decoration:none">
+              <img class="thumb" loading="lazy" :src="'/api/result/' + j.job_id + '/image'" :style="'aspect-ratio:' + aspect(j)" alt="">
+              <span class="sub mono" x-text="ago(j.finished_at)"></span>
+            </a>
+          </template>
+          <a href="#/gallery" class="btn sm">All images</a>
+        </aside>
+      </main>
+
+      <!-- ============================================================ GALLERY -->
+      <main class="content" x-show="route.page === 'gallery'">
+        <div class="row wrap">
+          <h1 style="margin:0;font-size:20px;font-weight:600">Gallery</h1>
+          <span class="sub" x-text="jobList.length + ' jobs · ' + doneCount + ' pictures'"></span>
+          <div class="grow"></div>
+          <input class="field" style="width:260px" aria-label="Search prompts" placeholder="Search prompts" x-model="filters.q">
+        </div>
+        <div class="row wrap" style="gap:8px">
+          <template x-for="s in statusFilters" :key="s"><button class="fchip" :class="filters.status === s && 'on'" @click="filters.status = s" x-text="s"></button></template>
+          <span style="width:1px;height:22px;background:var(--line)"></span>
+          <template x-for="m in modeFilters" :key="m"><button class="fchip" :class="filters.mode === m && 'on'" @click="filters.mode = m" x-text="m"></button></template>
+        </div>
+        <div class="sub" x-show="jobsLoaded && !jobList.length">No jobs yet.</div>
+        <div class="masonry">
+          <template x-for="j in filtered" :key="j.job_id">
+            <a class="tile" :href="'#/job/' + j.job_id">
+              <template x-if="j.status === 'done'"><img loading="lazy" :src="'/api/result/' + j.job_id + '/image'" :style="'aspect-ratio:' + aspect(j)" alt=""></template>
+              <template x-if="j.status !== 'done'">
+                <div class="art" :style="'aspect-ratio:' + aspect(j)">
+                  <span x-text="j.status === 'running' ? 'Generating, ' + pct(j) + '%' : j.status === 'queued' ? 'Waiting in the queue' : j.status === 'failed' ? 'Failed: ' + j.error : 'Cancelled'"></span>
+                </div>
+              </template>
+              <span class="badge" style="left:8px;top:8px" x-text="modeOf(j)"></span>
+              <span class="badge mono" style="right:8px;top:8px" :style="{ color: statusColor(j.status) }" x-text="j.status"></span>
+              <div style="padding:10px 12px">
+                <div class="clamp" x-text="j.params.prompt"></div>
+                <div class="sub mono" style="margin-top:4px" x-text="tileMeta(j)"></div>
+              </div>
+            </a>
+          </template>
+        </div>
+        <div class="row more" x-show="!exhausted && jobList.length >= limit"><button class="btn" @click="loadMore()" x-text="'Load ' + prefs.pageSize + ' more'"></button></div>
+      </main>
+
+      <!-- ============================================================ DETAIL -->
+      <div class="detail" x-show="route.page === 'job'">
+        <template x-if="detail">
+          <div style="display:contents">
+            <section class="view" aria-label="Picture">
+              <div class="row wrap">
+                <a class="btn" href="#/gallery">Back to gallery</a>
+                <span class="sub mono" x-text="'Job ' + detail.job_id.slice(0, 8) + '…'"></span>
+                <div class="grow"></div>
+                <button class="btn" @click="step(1)" aria-label="Previous picture">Prev</button>
+                <button class="btn" @click="step(-1)" aria-label="Next picture">Next</button>
+              </div>
+              <div class="stagebox" :class="zoom && 'scroll'">
+                <template x-if="detail.status === 'done'"><img :class="zoom && 'full'" :src="'/api/result/' + detail.job_id + '/image'" alt="Result"></template>
+                <div x-show="detail.status !== 'done'" style="text-align:center">
+                  <div x-text="detail.status === 'failed' ? 'Failed' : detail.status === 'cancelled' ? 'Cancelled' : detail.status === 'running' ? 'Generating, ' + pct(detail) + '%' : 'Waiting in the queue'"></div>
+                  <div class="err" style="margin-top:8px" x-show="detail.error" x-text="detail.error"></div>
+                </div>
+              </div>
+              <div class="row wrap">
+                <button class="btn" @click="zoom = !zoom" x-show="detail.status === 'done'" x-text="zoom ? 'Fit to screen' : 'Zoom 100%'"></button>
+                <span class="chip mono" x-show="detail.result" x-text="detail.result && detail.result.width + ' × ' + detail.result.height"></span>
+                <div class="grow"></div>
+                <span class="sub">The picture is fetched with the API key; it is not a public file</span>
+              </div>
+            </section>
+            <aside class="side" aria-label="Details">
+              <div>
+                <p class="lbl">Prompt</p>
+                <div style="line-height:1.5;white-space:pre-wrap" x-text="detail.params.prompt"></div>
+                <details style="margin-top:8px" x-show="detail.result && detail.result.enhanced_prompt">
+                  <summary>Enhanced prompt (used by the model)</summary>
+                  <div class="sub" style="line-height:1.5;margin-top:6px" x-text="detail.result && detail.result.enhanced_prompt"></div>
+                </details>
+                <div x-show="detail.params.negative_prompt" style="margin-top:8px"><span class="sub">Negative: </span><span x-text="detail.params.negative_prompt"></span></div>
+              </div>
+              <div class="grid2">
+                <button class="btn pri" style="grid-column:1 / -1" @click="reuse(detail, false)">Reuse all settings</button>
+                <button class="btn" @click="reuse(detail, true)">New seed variation</button>
+                <button class="btn" x-show="detail.result" @click="copy(detail.result.seed)">Copy seed</button>
+                <button class="btn" x-show="detail.status === 'done'" @click="useAsInit(detail)">Use as init image</button>
+                <button class="btn" x-show="detail.status === 'done'" @click="useAsReference(detail)">Use as reference</button>
+                <a class="btn" x-show="detail.status === 'done'" :href="'/api/result/' + detail.job_id + '/image'" :download="detail.job_id + '.png'">Download PNG</a>
+                <button class="btn dng" x-show="detail.status === 'queued' || detail.status === 'running'" @click="cancel(detail.job_id)">Cancel job</button>
+              </div>
+              <div>
+                <p class="lbl">Generation</p>
+                <dl class="kv">
+                  <dt>Mode</dt><dd x-text="modeOf(detail) + (detail.result && detail.result.references ? ' · ' + detail.result.references + ' references' : '')"></dd>
+                  <template x-if="detail.result">
+                    <div style="display:contents">
+                      <dt>Seed</dt><dd class="mono" x-text="detail.result.seed"></dd>
+                      <dt>Steps / CFG</dt><dd class="mono" x-text="detail.result.steps + ' / ' + detail.result.guidance_scale + ', interval ' + interval(detail.result)"></dd>
+                      <dt>Shift</dt><dd class="mono" x-text="detail.result.shift"></dd>
+                      <dt>Checkpoint</dt><dd class="mono" x-text="detail.result.checkpoint"></dd>
+                      <dt>LoRA</dt><dd class="mono" x-text="detail.result.loras.length ? detail.result.loras.map(l => l.name + ' · ' + l.weight).join(', ') : 'none'"></dd>
+                      <dt>Matmul</dt><dd class="mono" x-text="detail.result.matmul"></dd>
+                      <dt>Tokens</dt><dd class="mono" x-text="detail.result.tokens ?? '—'"></dd>
+                      <dt>Streamed blocks</dt><dd class="mono" x-text="detail.result.streamed_blocks"></dd>
+                      <dt>Warnings</dt><dd x-text="detail.warnings.length ? detail.warnings.join(' ') : 'none'"></dd>
+                    </div>
+                  </template>
+                  <template x-if="!detail.result">
+                    <div style="display:contents"><dt>Seed</dt><dd class="mono" x-text="detail.params.seed ?? 'random'"></dd><dt>Size</dt><dd class="mono" x-text="detail.params.aspect_ratio + ' at ' + detail.params.resolution"></dd></div>
+                  </template>
+                </dl>
+              </div>
+              <div x-show="Object.keys(detail.inputs || {}).length">
+                <p class="lbl">Input pictures</p>
+                <div class="inputs">
+                  <template x-for="[name, url] in kv(detail.inputs)" :key="name">
+                    <figure>
+                      <img class="thumb" :src="'/api' + url" :alt="name" @error="$el.replaceWith(Object.assign(document.createElement('div'), {className: 'chip', textContent: name + ': expired'}))">
+                      <span class="chip" style="padding:2px 6px;font-size:11px" x-text="name"></span>
+                    </figure>
+                  </template>
+                </div>
+                <p class="sub" style="margin:8px 0 0">The server keeps input pictures 7 days after the job.</p>
+              </div>
+              <div x-show="detail.result">
+                <p class="lbl">Timings</p>
+                <dl class="kv"><template x-for="[k, v] in kv(detail.result && detail.result.timings)" :key="k"><div style="display:contents"><dt x-text="k"></dt><dd class="mono" x-text="Number(v).toFixed(1) + ' s'"></dd></div></template></dl>
+              </div>
+              <div>
+                <p class="lbl">Job</p>
+                <dl class="kv">
+                  <dt>Owner</dt><dd class="mono" x-text="detail.owner"></dd>
+                  <dt>GPU slot</dt><dd class="mono" x-text="detail.slot || '—'"></dd>
+                  <dt>Created</dt><dd x-text="when(detail.created_at)"></dd>
+                  <dt>Finished</dt><dd x-text="when(detail.finished_at) || '—'"></dd>
+                </dl>
+              </div>
+            </aside>
+          </div>
+        </template>
+        <div x-show="!detail" class="content sub">Loading the job…</div>
+      </div>
+
+      <!-- ============================================================ SETTINGS -->
+      <main class="main" x-show="route.page === 'settings'">
+        <nav class="toc" aria-label="Sections">
+          <h1>Settings</h1>
+          <a href="#/settings" @click.prevent="$refs.s_connection.scrollIntoView()">Connection</a>
+          <span class="grp">Server (admin)</span>
+          <template x-for="g in groups" :key="g.id"><a href="#/settings" @click.prevent="document.getElementById('sec-' + g.id)?.scrollIntoView()" x-text="g.title"></a></template>
+          <a href="#/settings" @click.prevent="document.getElementById('sec-access')?.scrollIntoView()">Access</a>
+          <span class="grp">This web UI</span>
+          <a href="#/settings" @click.prevent="document.getElementById('sec-interface')?.scrollIntoView()">Interface</a>
+          <a href="#/settings" @click.prevent="document.getElementById('sec-defaults')?.scrollIntoView()">Create form</a>
+        </nav>
+        <div class="page">
+
+          <section class="sec" x-ref="s_connection">
+            <h2>Connection</h2>
+            <p class="lead">Where the web UI sends its requests. Kept in the web UI's config file, not in the browser</p>
+            <div class="set"><div class="name"><b>API address</b><span class="d">The server of this project</span></div><div class="ctl"><input class="field mono" aria-label="API address" x-model="connForm.api_url" placeholder="http://127.0.0.1:8000"></div></div>
+            <div class="set"><div class="name"><b>API key (Bearer)</b><span class="d" x-text="conn.has_key ? 'A key is saved; leave the field empty to keep it' : 'Not needed when the server has no keys configured'"></span></div><div class="ctl"><input class="field mono" type="password" autocomplete="off" aria-label="API key" x-model="connForm.api_key" placeholder="paste a key"></div></div>
+            <div class="set"><div class="name"><b>User id (X-User-Id)</b><span class="d">Optional for an admin client</span></div><div class="ctl"><input class="field mono" aria-label="User id" x-model="connForm.user_id" placeholder="not set"></div></div>
+            <div class="row wrap">
+              <button class="btn pri" @click="saveConnection()" :disabled="connBusy">Save and test</button>
+              <button class="btn" @click="testConnection()" :disabled="connBusy">Test</button>
+              <button class="btn dng" x-show="conn.has_key" @click="clearKey()">Remove saved key</button>
+            </div>
+            <div x-show="connTest" style="line-height:1.6">
+              <div class="err" x-show="connTest && connTest.error" x-text="connTest && connTest.error"></div>
+              <template x-if="connTest && !connTest.error">
+                <div>
+                  <div><span :style="{ color: connTest.reachable ? 'var(--ok)' : 'var(--bad)' }" x-text="connTest.reachable ? '✓ API reachable' : '✗ API not reachable'"></span>
+                    <span class="sub" x-show="connTest.health" x-text="connTest.health && ('· models ' + connTest.health.status + ' · ' + connTest.health.checkpoint)"></span></div>
+                  <div x-show="connTest.reachable"><span :style="{ color: connTest.authorized ? 'var(--ok)' : 'var(--bad)' }" x-text="connTest.authorized ? '✓ key accepted' : '✗ key refused'"></span>
+                    <span class="sub" x-show="connTest.authorized" x-text="connTest.admin ? '· admin client' : '· not an admin client: server settings and checkpoint switching are unavailable'"></span></div>
+                  <div class="err" x-show="connTest.detail" x-text="connTest.detail"></div>
+                </div>
+              </template>
+            </div>
+            <div class="stats" x-show="health">
+              <div><span class="sub">Server</span><span x-text="health && health.status === 'ok' ? 'ok, models loaded' : health && health.status"></span></div>
+              <div><span class="sub">Access control</span><span x-text="health && health.access_control ? 'on' : 'off'"></span></div>
+              <div><span class="sub">GPU slots</span><span class="mono" x-text="health && health.queue ? health.queue.slots.map(s => s.device).join(', ') : '—'"></span></div>
+            </div>
+          </section>
+
+          <div class="banner err2" x-show="cfgError"><span x-text="cfgError"></span></div>
+          <div class="banner info" x-show="cfg">Server settings come from GET /config and are changed with PATCH /config; admins only. Every row says how a change takes effect: <span class="tag live">live</span> at once, <span class="tag rel">reloads models</span> only with an empty queue, <span class="tag rst">restart</span> saved and used from the next start. Changes are saved in the server's override file and survive a restart.</div>
+          <div class="banner warn" x-show="cfg && cfg.restart_pending.length">Waiting for a restart of the server: <span class="mono" x-text="cfg && cfg.restart_pending.join(', ')"></span></div>
+          <div class="banner warn" x-show="cfg && cfg.problems.length"><template x-for="p in (cfg ? cfg.problems : [])"><div x-text="p"></div></template></div>
+
+          <div class="chg-bar" x-show="draftNames.length || applyNote">
+            <span><b x-text="draftNames.length + (draftNames.length === 1 ? ' change ready' : ' changes ready')"></b> <span class="sub mono" x-text="draftNames.join(', ')"></span></span>
+            <div class="grow"></div>
+            <button class="btn sm" :disabled="cfgBusy || !draftNames.length" @click="applyChanges(true)">Check only</button>
+            <button class="btn sm pri" :disabled="cfgBusy || !draftNames.length" @click="applyChanges(false)">Apply</button>
+            <button class="btn sm" :disabled="cfgBusy" @click="discard()">Discard</button>
+          </div>
+          <div x-show="applyNote" class="note" :class="applyNote && applyNote.bad ? 'bad' : 'good'">
+            <template x-if="applyNote && applyNote.bad"><div x-text="applyNote.text"></div></template>
+            <template x-if="applyNote && !applyNote.bad">
+              <div>
+                <div x-text="applyNote.dry ? 'Checked, nothing was changed. If applied: ' : 'Done. '"></div>
+                <div x-show="applyNote.applied.length">In effect now: <span class="mono" x-text="applyNote.applied.join(', ')"></span></div>
+                <div x-show="applyNote.restart.length">Saved, used from the next restart: <span class="mono" x-text="applyNote.restart.join(', ')"></span></div>
+                <div x-show="applyNote.unchanged.length">Unchanged: <span class="mono" x-text="applyNote.unchanged.join(', ')"></span></div>
+                <div x-show="applyNote.reloaded !== 'none'" x-text="'Models reloaded: ' + applyNote.reloaded"></div>
+                <template x-for="w in applyNote.warnings"><div x-text="'Warning: ' + w"></div></template>
+              </div>
+            </template>
+          </div>
+
+          <template x-for="g in groups" :key="g.id">
+            <section class="sec" :id="'sec-' + g.id" x-show="items(g.id).length">
+              <h2 x-text="g.title"></h2>
+              <p class="lead" x-show="g.lead" x-text="g.lead"></p>
+              <template x-for="s in items(g.id)" :key="s.name">
+                <div class="set">
+                  <div class="name">
+                    <b><span x-text="label(s)" :title="s.env"></span>
+                      <template x-for="t in tags(s)" :key="t.text"><span class="tag" :class="t.cls" x-text="t.text"></span></template></b>
+                    <span class="d" x-text="s.description"></span>
+                  </div>
+                  <div class="ctl">
+                    <template x-if="control(s) === 'readonly'"><input class="field mono ro" readonly :value="shown(s)" :aria-label="label(s)"></template>
+                    <template x-if="control(s) === 'bool'"><label class="row"><input type="checkbox" :checked="cur(s)" @change="edit(s, $event.target.checked)"> <span x-text="cur(s) ? 'On' : 'Off'"></span></label></template>
+                    <template x-if="control(s) === 'choice'"><div class="seg"><template x-for="c in s.choices" :key="c"><button :class="cur(s) === c && 'on'" @click="edit(s, c)" x-text="c"></button></template></div></template>
+                    <template x-if="control(s) === 'number' || control(s) === 'text' || control(s) === 'json'"><input class="field mono" :class="errorOf(s) && 'bad'" :value="shown(s)" @input="edit(s, $event.target.value)" :aria-label="label(s)" :placeholder="s.nullable ? 'not set' : ''"></template>
+                    <template x-if="control(s) === 'dir'">
+                      <div class="row"><input class="field mono" :class="errorOf(s) && 'bad'" :value="shown(s)" @input="edit(s, $event.target.value)" :aria-label="label(s)" :placeholder="s.nullable ? 'default' : ''"><button class="btn sm" @click="openBrowse(s)">Browse</button></div>
+                    </template>
+                    <template x-if="control(s) === 'file'">
+                      <div class="row"><button class="btn" style="flex:1;justify-content:space-between" @click="openFilePick(s)" :aria-label="'Choose ' + label(s)"><span class="mono" x-text="shown(s) || '—'"></span><span class="sub">▾</span></button></div>
+                    </template>
+                    <div class="err" x-show="errorOf(s)" x-text="s.name + ': ' + errorOf(s)"></div>
+                    <div class="sub" x-show="s.pending_restart" x-text="'Saved: ' + JSON.stringify(s.saved) + '. Running: ' + JSON.stringify(s.value)"></div>
+                    <div class="sub" x-show="s.effective && s.value === null" x-text="'In use: ' + s.effective"></div>
+                    <div class="row wrap" x-show="s.editable && s.source === 'override'"><button class="btn sm" @click="resetSetting(s)">Reset to the environment value</button></div>
+
+                    <!-- file picker: the same tree as on the Create page -->
+                    <div class="picker" x-show="spick && spick.name === s.name">
+                      <input class="field" placeholder="Filter files" :value="spick ? spick.filter : ''" @input="spick.filter = $event.target.value" :aria-label="'Filter ' + label(s)">
+                      <div class="tree">
+                        <template x-for="row in spickRows()" :key="row.kind + (row.path || row.name)">
+                          <button class="node" :style="'padding-left:' + (8 + row.depth * 18) + 'px'" @click="row.kind === 'dir' ? toggleSpick(row.path) : chooseFile(s, row)">
+                            <span class="mark" x-text="row.kind === 'dir' ? (row.open ? '▾' : '▸') : ''"></span>
+                            <span class="grow" x-text="row.label"></span><span class="sub" x-text="row.hint || ''"></span>
+                          </button>
+                        </template>
+                      </div>
+                    </div>
+
+                    <!-- folder browser: GET /fs, allowed roots only -->
+                    <div class="picker" x-show="fsb && fsb.name === s.name">
+                      <div class="sub mono" x-text="fsb && fsb.data ? (fsb.data.path || 'Allowed roots') : '…'"></div>
+                      <div class="err" x-show="fsb && fsb.error" x-text="fsb && fsb.error"></div>
+                      <div class="tree">
+                        <button class="node" x-show="fsb && fsb.data && fsb.data.parent" @click="browseTo(fsb.data.parent)"><span class="mark">↑</span><span class="grow">Up</span></button>
+                        <template x-for="d in (fsb && fsb.data ? fsb.data.dirs : [])" :key="d.path">
+                          <button class="node" @click="browseTo(d.path)"><span class="mark">▸</span><span class="grow" x-text="d.name"></span></button>
+                        </template>
+                        <div class="sub" x-show="fsb && fsb.data && fsb.data.truncated" style="padding:6px">The list is cut: type the path instead.</div>
+                      </div>
+                      <div class="row wrap" x-show="fsb && fsb.data && fsb.data.path">
+                        <button class="btn sm pri" @click="useFolder(s)">Use this folder</button>
+                        <span class="sub" x-text="fsb && fsb.data ? fsb.data.model_files + ' model files here' : ''"></span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </section>
+          </template>
+
+          <section class="sec" id="sec-access" x-show="cfg">
+            <h2>Access <span class="tag">read-only</span></h2>
+            <p class="lead">Keys and admin rights stay in the server's environment: the API never shows a key and never edits its own access list</p>
+            <div class="stats">
+              <div><span class="sub">Access control</span><span x-text="cfg && cfg.access_control.enabled ? 'on' : 'off'"></span></div>
+              <div><span class="sub">Clients</span><span class="mono" x-text="cfg && cfg.access_control.clients.join(', ') || '—'"></span></div>
+              <div><span class="sub">Admin clients</span><span class="mono" x-text="cfg && cfg.access_control.admin_clients.join(', ') || '—'"></span></div>
+            </div>
+            <div class="sub" x-show="cfg" x-text="'Override file: ' + (cfg && cfg.override_file)"></div>
+          </section>
+
+          <section class="sec" id="sec-interface">
+            <h2>Interface <span class="tag">this web UI</span></h2>
+            <p class="lead">How the web UI itself behaves; kept in this browser</p>
+            <div class="set"><div class="name"><b>Job updates</b><span class="d">Live uses the server's event stream of a job: progress, queue position and the end arrive at once. Polling asks the list of jobs every few seconds instead</span></div>
+              <div class="ctl"><div class="seg"><button :class="prefs.updates === 'live' && 'on'" @click="setPref('updates', 'live')">Live</button><button :class="prefs.updates === 'polling' && 'on'" @click="setPref('updates', 'polling')">Polling</button></div></div></div>
+            <div class="set" x-show="prefs.updates === 'polling'"><div class="name"><b>Polling interval</b></div>
+              <div class="ctl"><div class="seg"><template x-for="n in [1, 2, 5]" :key="n"><button :class="prefs.pollSec === n && 'on'" @click="setPref('pollSec', n)" x-text="n + ' s'"></button></template></div></div></div>
+            <div class="set"><div class="name"><b>Web UI listens on</b><span class="d">The address of this web UI itself, separate from the API. Local network lets other computers open it; they then act with this UI's saved API key, so use it only in a network you trust</span></div>
+              <div class="ctl">
+                <div class="seg"><button :class="listen.mode === 'local' && 'on'" @click="setListenMode('local')">This computer</button><button :class="listen.mode === 'network' && 'on'" @click="setListenMode('network')">Local network</button><button :class="listen.mode === 'custom' && 'on'" @click="setListenMode('custom')">Custom</button></div>
+                <div class="row"><input class="field mono" aria-label="Web UI address" x-model="listen.host" :readonly="listen.mode !== 'custom'"><input class="field mono" style="max-width:110px" aria-label="Web UI port" x-model="listen.port" inputmode="numeric"></div>
+                <div class="row wrap"><button class="btn sm" @click="saveListen()">Save</button><span class="sub">Needs a restart of the web UI.<span x-show="listen.mode !== 'local' && listen.lan_address"> Address to share: <span class="mono" x-text="'http://' + listen.lan_address + ':' + listen.port"></span></span></span></div>
+                <div class="warn" x-show="listen.mode !== 'local'">Everyone who can open the page acts with the API key saved here. Set API keys on the server first.</div>
+                <div class="sub" x-text="listenNote"></div>
+              </div></div>
+            <div class="set"><div class="name"><b>Gallery: pictures per page</b></div>
+              <div class="ctl"><div class="seg"><template x-for="n in [25, 50, 100, 200]" :key="n"><button :class="prefs.pageSize === n && 'on'" @click="setPref('pageSize', n)" x-text="n"></button></template></div></div></div>
+            <div class="set"><div class="name"><b>Remember the last Create form</b></div>
+              <div class="ctl"><label class="row"><input type="checkbox" :checked="prefs.rememberForm" @change="setPref('rememberForm', $event.target.checked)"> <span x-text="prefs.rememberForm ? 'On' : 'Off'"></span></label></div></div>
+          </section>
+
+          <section class="sec" id="sec-defaults">
+            <h2>Create form defaults <span class="tag">this web UI</span></h2>
+            <p class="lead">What the form starts with when nothing is remembered</p>
+            <div class="set"><div class="name"><b>Mode</b></div><div class="ctl"><div class="seg"><template x-for="m in modes" :key="m"><button :class="prefs.mode === m && 'on'" @click="setPref('mode', m)" x-text="m"></button></template></div></div></div>
+            <div class="set"><div class="name"><b>Resolution</b></div><div class="ctl"><div class="seg"><template x-for="t in tiers" :key="t"><button :class="prefs.resolution === t && 'on'" @click="setPref('resolution', t)" x-text="t"></button></template></div></div></div>
+            <div class="set"><div class="name"><b>Aspect ratio</b></div><div class="ctl"><select class="field" aria-label="Aspect ratio" :value="prefs.ratio" @change="setPref('ratio', $event.target.value)"><template x-for="r in Object.keys(resolutions[prefs.resolution] || {})" :key="r"><option :value="r" :selected="r === prefs.ratio" x-text="r"></option></template></select></div></div>
+            <div class="row"><button class="btn" @click="resetPrefs()">Reset to defaults</button></div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+  <div class="modal" x-show="galleryPick" @keydown.escape.window="galleryPick = null" @click.self="galleryPick = null">
+    <div class="sheet">
+      <div class="row"><h2 style="margin:0;font-size:16px">Pick a picture from the gallery</h2><div class="grow"></div><button class="btn sm" @click="galleryPick = null">Close</button></div>
+      <div class="sub" x-show="!pickable.length">No finished pictures yet.</div>
+      <div class="pickgrid">
+        <template x-for="j in pickable" :key="j.job_id">
+          <button class="pickitem" @click="pickFromJob(j)" :title="j.params.prompt"><img loading="lazy" :src="'/api/result/' + j.job_id + '/image'" alt=""></button>
+        </template>
+      </div>
+    </div>
+  </div>
+  <div class="toast" x-show="toast" x-text="toast"></div>
+</div>
+</body>
+</html>

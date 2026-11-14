@@ -17,3 +17,6 @@ data/
 
 # Local documentation (Russian working notes): kept on this machine only, not tracked
 /docs/
+
+# web UI: connection settings with the API key (clients/webui)
+clients/webui/webui_settings.json
