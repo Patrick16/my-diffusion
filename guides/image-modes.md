@@ -107,8 +107,9 @@ uv run my-diffusion-generate "the same pier, the sea and the sky continue to the
 
 By default the model may lightly redraw the original area too. Add `"keep_original": true`
 (CLI: `--keep-original`) to keep it: after every step the original is put back, as in inpaint, so
-only the margins are generated (the area stays within about 1-2/255 of the source, the VAE round-trip
-floor; a 16 px band along inner edges is blended to hide the seam). With two references the second
+only the margins are generated (a 16 px band along inner edges is blended in latent space to hide the
+seam). After the VAE decode the original pixels are pasted back with an 8 px feathered seam, so the kept
+area is pixel-exact (resized to its box) except inside that seam. With two references the second
 one then only fits into the margins.
 
 ## Background removal (`remove_background`)

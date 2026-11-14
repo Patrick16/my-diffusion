@@ -106,6 +106,9 @@ Write under 120 words. Output only the description: no preamble, no explanations
 # keep_original: latent cells (8 px each) along the inner edges of reference 1's box where the generated
 # margin and the kept picture are mixed (imaging.outpaint_keep_weight). Chosen by looking at GPU results.
 KEEP_BLEND = 2
+# keep_original: pixels over which the original is feathered back in after the VAE decode (imaging.paste_original).
+# Smaller than the latent band (KEEP_BLEND * 8 px) so the ramp lies where the latent is already mostly the original.
+KEEP_PASTE_OVERLAP = 8
 
 
 def normalize_outpaint(outpaint, references: list, reference_mode: str) -> imaging.Margins | None:
@@ -525,7 +528,8 @@ class Krea2Engine:
         keep_original - only with outpaint: keep reference 1's pixels as they are. Its area is held to the
         original picture after every step, exactly like the kept part of an inpaint (latent blend), and only
         the margins are generated; a band of KEEP_BLEND latent cells at the inner edges of the box is mixed
-        (imaging.outpaint_keep_weight), so the seam stays hidden but those cells may change. Off by default.
+        (imaging.outpaint_keep_weight), so the seam stays hidden. After the VAE decode the original pixels are pasted back
+        (imaging.paste_original, 8 px feathered seam), so the kept area is exact. Off by default.
         remove_background - "subjects": cut the background (u2net, on the CPU) out of the people / objects before
         they are used: references 2.. in "scene" mode, all references in "subjects" mode; "none" - leave as is.
         Not combinable with init_image or mask."""
@@ -809,6 +813,10 @@ class Krea2Engine:
         t0 = time.time()
         self.gpu.use("vae")
         image = self.vae.decode(latent)
+        if keep_canvas is not None:
+            # The latent blend holds the original only up to the VAE round trip (1-2/255 off); paste its pixels back
+            # with a feathered seam so the kept area is exact (Wan2GP does the same after the decode).
+            image = imaging.paste_original(image, keep_canvas, src_box, KEEP_PASTE_OVERLAP)
         timings["decode"] = time.time() - t0
 
         path = s.output_dir / (output_name or f"{int(time.time())}_{seed}.png")

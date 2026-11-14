@@ -145,6 +145,44 @@ def place_in_frame(picture: Image.Image, frame_w: int, frame_h: int, src_box: tu
     return Image.fromarray(padded)
 
 
+def paste_original(
+    decoded: Image.Image, original: Image.Image, src_box: tuple[int, int, int, int], overlap: int = 8
+) -> Image.Image:
+    """Put the original pixels back into a decoded outpaint result, with a feathered seam (Wan2GP's
+    `blend_images_with_mask` after the VAE decode). `original` is a full-frame canvas (see place_in_frame);
+    only its src_box region is used.
+
+    Alpha is 1 deep inside the box and falls linearly to 0 over `overlap` pixels at the box's INNER edges
+    (an edge that does not lie on the frame's border, where nothing is generated beyond it, so alpha stays 1
+    right up to the border). Outside the box alpha is 0: the generated margin is left untouched. The ramp
+    lies inside the band where the latent blend already mixes the two, so the pasted pixels meet pixels
+    that are close to the original and the seam stays invisible. overlap = 0 is a hard edge.
+    Returns a new picture; the kept area is then byte-identical to the original except in the ramp."""
+    if decoded.size != original.size:
+        raise ValueError(f"decoded {decoded.size} and original {original.size} must have the same size")
+    if overlap < 0:
+        raise ValueError(f"overlap must be >= 0, got {overlap}")
+    frame_w, frame_h = decoded.size
+    left, top, box_w, box_h = src_box
+    if box_w <= 0 or box_h <= 0 or left < 0 or top < 0 or left + box_w > frame_w or top + box_h > frame_h:
+        raise ValueError(f"src_box {src_box} does not fit the {frame_w}x{frame_h} frame")
+
+    def axis(n: int, a: int, b: int) -> np.ndarray:
+        """Alpha per pixel along one axis: 0 outside [a, b), the ramp over `overlap` pixels at inner edges, 1 elsewhere."""
+        i = np.arange(n, dtype=np.float32)
+        alpha = ((i >= a) & (i < b)).astype(np.float32)
+        if overlap > 0:
+            if a > 0:
+                alpha = np.minimum(alpha, (i - a + 1) / (overlap + 1))
+            if b < n:
+                alpha = np.minimum(alpha, (b - i) / (overlap + 1))
+        return np.clip(alpha, 0.0, 1.0)
+
+    alpha = np.minimum(axis(frame_h, top, top + box_h)[:, None], axis(frame_w, left, left + box_w)[None, :])[..., None]
+    out = np.asarray(decoded.convert("RGB"), dtype=np.float32) * (1 - alpha) + np.asarray(original.convert("RGB"), dtype=np.float32) * alpha
+    return Image.fromarray(np.clip(np.rint(out), 0, 255).astype(np.uint8))
+
+
 def load_rgb(data: bytes) -> Image.Image:
     """Decode PNG/JPEG (or any format Pillow knows) bytes into an RGB picture.
 
