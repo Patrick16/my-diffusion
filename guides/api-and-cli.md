@@ -25,7 +25,7 @@ four addresses.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /health` | `loading` / `ok` / `error`, the current checkpoint |
+| `GET /health` | `loading` / `ok` / `error`, the current checkpoint, the matmul mode, the attention kernel and the edit size policy (`edit_limits`, `edit_max_pixels`) |
 | `POST /generate` | queue a generation; answers at once (`202`) with the job id |
 | `GET /result/{job_id}` | the job: status, position in the queue, progress, result or error |
 | `GET /result/{job_id}/events` | the same job pushed as server-sent events, instead of polling ([details](job-queue.md#events-instead-of-polling)) |

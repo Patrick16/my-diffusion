@@ -14,6 +14,7 @@ are cached: repeating the same prompt (for example, with another seed) does not 
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import importlib.util
 import logging
@@ -27,13 +28,13 @@ from typing import Callable
 import torch
 from PIL import Image
 
-from . import background, cancellation, imaging, sampler
+from . import background, cancellation, imaging, limits, sampler
 from .config import Settings, inside_folder
 from .imaging import cover_crop
 from .lora import LoraFile, apply_loras, load_lora, truncate_rank
 from .memory import GpuSlot, Resident
 from .pinned import release_unused
-from .resolutions import ASPECT_RATIOS, max_pixels, resolve_dimensions, resolve_dimensions_from_size
+from .resolutions import ASPECT_RATIOS, resolve_dimensions, resolve_dimensions_from_size
 from .text_encoder import QwenVL
 from .transformer import Krea2Transformer, set_attention_kernel
 from .vae import LATENT_CHANNELS, VAE_SCALE, LatentDecoder
@@ -147,6 +148,7 @@ class Krea2Engine:
         self._applied_loras: list[tuple[LoraFile, float]] = []   # the set of LoRAs currently attached to the network
         self._applied_streaming = settings.lora_streaming        # whether that set was attached with LoRA streaming
         self._lock = threading.Lock()   # one generation at a time: there is one GPU
+        self._run_size: tuple[int, int, int] | None = None   # width, height, tokens of the running job (for error messages)
 
     # ------------------------------------------------------------------ loading
     def load(self, checkpoint: str | None = None) -> None:
@@ -293,14 +295,33 @@ class Krea2Engine:
         0.42 GB of video memory for the activations of a long sequence and is copied in for the moment it runs
         (weights.streamed_weights). 0 (the state after loading a checkpoint) - the whole network on the GPU.
 
-        Not used by generate() on its own yet: nothing within the engine's size limits needs it. It is the
-        mechanism for sizes above them (measured by scripts/check_memory.py: 4 blocks are enough for a 1440p
-        edit with one reference, 29 thousand tokens, on a 16 GB card). Call it between generations."""
+        generate() uses it on its own for sequences that do not fit the free video memory (_plan_streaming; measured
+        by scripts/check_memory.py: 4 blocks are enough for a 1440p edit with one reference, 29 thousand tokens, on a
+        16 GB card) and puts the previous value back afterwards. Call it between generations."""
         if self.model.streamed_weight_blocks == blocks:
             return
         if self.gpu.active == "model":
             self.gpu.release()   # the marks are read on the way to the GPU: the next generation moves the network anew
         self.model.stream_weights(blocks)
+
+    def _plan_streaming(self, tokens: int) -> int:
+        """Streams as many blocks as a sequence of `tokens` needs to fit the free video memory (limits.plan_streaming)
+        and returns how many blocks are streamed for this run. Without CUDA (or on the CPU) nothing changes.
+
+        The memory the run may use is what is free now plus what the network already holds on the GPU (it is not
+        freed for the measurement: moving it back and forth would cost a second on every job)."""
+        current = self.model.streamed_weight_blocks
+        device = self.settings.device
+        if limits.free_vram_gb(device) is None:
+            return current
+        torch.cuda.empty_cache()
+        resident = limits.WEIGHTS_GB - limits.BLOCK_GB * current if self.gpu.active == "model" else 0.0
+        available = limits.free_vram_gb(device) + resident
+        wanted = limits.plan_streaming(tokens, available, current=current)
+        if wanted != current:
+            logger.info("%d thousand tokens do not fit %.1f GB of video memory: streaming %d blocks", tokens // 1000, available, wanted)
+            self.stream_weights(wanted)
+        return wanted
 
     def set_attention(self) -> None:
         """Sets the attention kernel from the settings on the loaded network. Like the matmul mode, it can be
@@ -513,11 +534,40 @@ class Krea2Engine:
         if output_name is not None and (Path(output_name).name != output_name or not output_name.endswith(".png")):
             raise ValueError(f"output_name must be a plain .png file name, got {output_name!r}")
         with self._lock:
-            return self._generate(
-                prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
-                tuple(guidance_interval), init_image, strength, mask, feather, list(references or []), reference_mode,
-                outpaint, remove_background, keep_original, cancel_event, on_progress, output_name,
-            )
+            streamed_before = self.model.streamed_weight_blocks
+            self._run_size = None
+            try:
+                return self._generate(
+                    prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
+                    tuple(guidance_interval), init_image, strength, mask, feather, list(references or []), reference_mode,
+                    outpaint, remove_background, keep_original, cancel_event, on_progress, output_name,
+                )
+            except Exception as exc:
+                if not limits.is_out_of_memory(exc):
+                    raise
+                self._after_out_of_memory()
+                raise limits.GenerationOutOfMemory(self._out_of_memory_message()) from None
+            finally:
+                # A run that streamed more blocks than before puts the network back as it was: the next, smaller
+                # job does not pay for streaming it does not need.
+                if self.model.streamed_weight_blocks != streamed_before:
+                    self.stream_weights(streamed_before)
+
+    def _after_out_of_memory(self) -> None:
+        """Leaves the GPU usable after a failed run: every model back in RAM, the allocator's cache returned."""
+        with contextlib.suppress(Exception):   # the cleanup must not hide the reason with a second error
+            self.gpu.release()
+        gc.collect()
+        if self.settings.device != "cpu":
+            torch.cuda.empty_cache()
+
+    def _out_of_memory_message(self) -> str:
+        size = "" if not self._run_size else f" at {self._run_size[0]}x{self._run_size[1]}" + (
+            f" (a sequence of about {self._run_size[2] // 1000} thousand tokens)" if self._run_size[2] else "")
+        return (
+            f"the GPU ran out of memory{size}; the job was stopped and the memory freed. Use a smaller resolution or "
+            "fewer references, close other programs that use the video memory, or set edit_max_pixels to refuse such sizes"
+        )
 
     def _generate(
         self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval,
@@ -578,12 +628,10 @@ class Krea2Engine:
             width, height = resolve_dimensions_from_size(resolution, *references[0].size)
         else:
             width, height = resolve_dimensions(resolution, aspect_ratio)
+        above_strict = None   # set when the policy lets through a size that strict mode would refuse
         if references:
-            tier = EDIT_MAX_TIER[min(len(references), 2)]
-            if width * height > max_pixels(tier):
-                raise ValueError(
-                    f"an edit with {len(references)} reference(s) at {width}x{height} does not fit the GPU; use resolution {tier} or lower"
-                )
+            above_strict = limits.check_edit_size(s.edit_limits, s.edit_max_pixels, width, height, len(references), EDIT_MAX_TIER)
+        self._run_size = (width, height, 0)   # for the out-of-memory message; the tokens are filled in below
         if mask is not None and init_image is None:
             raise ValueError("a mask needs an init image: inpaint regenerates the white part of the mask in a given picture")
         if init_image is not None:
@@ -679,6 +727,12 @@ class Krea2Engine:
         # 2. noise -> latent
         cancellation.checkpoint(cancel_event)
         t0 = time.time()
+        tokens = limits.image_tokens(width, height) + sum(limits.image_tokens(*frame.size) for frame in frames) + int(cond.shape[1])
+        self._run_size = (width, height, tokens)
+        streamed = self._plan_streaming(tokens)
+        warnings: list[str] = []
+        if above_strict is not None and s.edit_limits == "warn":
+            warnings.append(limits.large_edit_warning(width, height, len(references), tokens, steps, streamed))
         self.gpu.use("model")
         # The same LoRA set with the same weights as in the previous request is already attached and sits
         # on the GPU - we do not move it again. We compare the objects themselves (is), not the names:
@@ -782,5 +836,8 @@ class Krea2Engine:
             "remove_background": remove_background if cut_background else "none",
             "keep_original": bool(keep_original),
             "edit_lora_rank": edit_rank,   # None without editing or with the edit LoRA switched off
+            "tokens": tokens,              # the length of the network's sequence: text + picture + references
+            "streamed_blocks": streamed,   # how many blocks ran with streamed weights (see _plan_streaming)
+            "warnings": warnings,
             "timings": {k: round(v, 2) for k, v in timings.items()},
         }

@@ -61,7 +61,7 @@ def stage(monkeypatch, tmp_path):
         "checkpoint": "a.safetensors", "vae": "vae.safetensors", "text_encoder": "qwen", "edit_lora": "edit",
         "rembg_model": "rembg/u2net.onnx", "settings_file": s.override, "matmul": "fp8_all", "attention": "cudnn",
         "attention_sage2_min_tokens": 6000, "pin_memory": True, "queue_max_pending": 16, "api_docs": True,
-        "devices": None, "max_references": 2,
+        "devices": None, "max_references": 2, "edit_limits": "warn", "edit_max_pixels": None,
     }
     for name, value in values.items():
         monkeypatch.setattr(api.settings, name, value)
@@ -156,6 +156,20 @@ def test_every_setting_is_described(client):
     assert setting(body, "queue_max_pending") == {**setting(body, "queue_max_pending"), "type": "integer", "minimum": 1}
     assert setting(body, "checkpoint")["apply"] == "reload_models" and setting(body, "devices")["apply"] == "restart"
     assert setting(body, "output_dir")["editable"] is False
+
+
+def test_the_edit_size_policy_is_described_and_applies_live(client, stage):
+    body = client.get("/config").json()
+    limits = setting(body, "edit_limits")
+    assert limits["choices"] == ["strict", "warn", "off"] and limits["value"] == "warn" and limits["apply"] == "live"
+    cap = setting(body, "edit_max_pixels")
+    assert cap["nullable"] is True and cap["value"] is None and cap["minimum"] == 1 and cap["apply"] == "live"
+    response = patch(client, set={"edit_limits": "strict", "edit_max_pixels": 2_000_000})
+    assert response.status_code == 200
+    assert api.settings.edit_limits == "strict" and api.settings.edit_max_pixels == 2_000_000
+    assert api.engine.settings.edit_limits == "strict"   # the engine reads it on its next job: no reload
+    assert patch(client, set={"edit_limits": "never"}).status_code == 422
+    assert patch(client, set={"edit_max_pixels": None}).status_code == 200 and api.settings.edit_max_pixels is None
 
 
 def test_model_folders_show_the_folder_really_used(client, stage):

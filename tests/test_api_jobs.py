@@ -50,7 +50,9 @@ def fake_generate(**kwargs) -> dict:
             time.sleep(0.01)
     path = api.settings.output_dir / kwargs["output_name"]
     Image.new("RGB", (16, 16), (200, 0, 0)).save(path)
+    warnings = ["large edit: about 2 minutes"] if prompt == "large" else []
     return {
+        "warnings": warnings, "tokens": 21895, "streamed_blocks": 4 if warnings else 0,
         "image_path": str(path), "width": 16, "height": 16, "seed": 1, "prompt": prompt,
         "enhanced_prompt": None, "steps": 1, "guidance_scale": 1.0, "guidance_interval": [0.0, 1.0],
         "shift": 1.0, "checkpoint": "fake.safetensors", "matmul": "exact", "loras": [], "timings": {},
@@ -242,3 +244,21 @@ def test_per_user_limit_is_429_but_not_for_admins(secured):
 
 def test_only_admins_switch_checkpoints(secured):
     assert secured.post("/checkpoints/load", json={"name": "x"}, headers=bot("111")).status_code == 403
+
+
+def test_a_job_accepted_by_the_size_policy_carries_its_warning(client):
+    job = client.post("/generate", json={"prompt": "large"}).json()
+    done = wait_for(client, job["job_id"], lambda body: body["status"] == "done")
+    assert done["warnings"] == ["large edit: about 2 minutes"]
+    assert done["result"]["warnings"] == done["warnings"] and done["result"]["streamed_blocks"] == 4
+    plain = wait_for(client, client.post("/generate", json={"prompt": "a cat"}).json()["job_id"], lambda body: body["status"] == "done")
+    assert plain["warnings"] == []
+
+
+def test_health_shows_the_size_policy(client, monkeypatch):
+    health = client.get("/health").json()
+    assert health["edit_limits"] == "warn" and health["edit_max_pixels"] is None
+    monkeypatch.setattr(api.settings, "edit_limits", "strict")
+    monkeypatch.setattr(api.settings, "edit_max_pixels", 2_000_000)
+    health = client.get("/health").json()
+    assert health["edit_limits"] == "strict" and health["edit_max_pixels"] == 2_000_000

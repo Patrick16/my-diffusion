@@ -391,6 +391,7 @@ async def health() -> dict:
         "status": status, "error": _load_error, "checkpoint": engine.checkpoint_name,
         "kind": engine.kind if engine.loaded else None,
         "matmul": engine.matmul, "native_layers": engine.native_layers, "attention": settings.attention,
+        "edit_limits": settings.edit_limits, "edit_max_pixels": settings.edit_max_pixels,
         "access_control": bool(settings.api_keys),
         "queue": queue,
     }
@@ -564,6 +565,7 @@ def _job_info(job: JobRecord, positions: dict[str, int] | None = None) -> JobInf
         result=None if job.result is None else GenerationResult(**job.result),
         image_url=f"/result/{job.id}/image" if job.status == "done" else None,
         inputs=_input_urls(job),
+        warnings=[] if job.result is None else list(job.result.get("warnings", [])),
         error=job.error,
     )
 

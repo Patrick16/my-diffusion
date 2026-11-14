@@ -79,7 +79,14 @@ uv run my-diffusion-generate "the two people at a cafe table" --reference-mode s
 
 ### Limits of reference editing
 
-- Two references work only at the 480 tier (`resolution: "480"`); one reference goes up to 720. 1080 is not supported.
+- Every size up to 1440p runs on a 16 GB card, because the engine streams part of the network from RAM when the
+  sequence is long. What differs is time: an edit with one reference takes about 30 s at 720, about 80 s at 1080 and
+  about 170 s at 1440; two references at 1080 about 110 s.
+- The old limits (one reference up to 720, two at 480) are now a policy, `MY_DIFFUSION_EDIT_LIMITS`: `strict` refuses
+  larger sizes, `warn` (the default) accepts them and the job's `warnings` says it is large and about how long it
+  takes, `off` accepts silently. `MY_DIFFUSION_EDIT_MAX_PIXELS` caps the output frame in every mode. See
+  [configuration](configuration.md). The CUDA out-of-memory error is the second line of defence: the job fails with a
+  clear message and the next job runs.
 - A GPU check of the features is in `scripts/check_outpaint.py` (it saves pictures to `outputs/`).
 
 ## Outpainting (`outpaint`)

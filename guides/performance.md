@@ -104,13 +104,14 @@ VRAM is the same. To compare the modes on your own prompt: `uv run python script
 The edit LoRA runs at rank 128 for every edit (128 vs 256 was measured as visually similar). It is
 streamed per block from pinned RAM (`MY_DIFFUSION_LORA_STREAMING`, default `true`), which costs about
 5% per network pass. Measured on a 16 GB laptop GPU, turbo, 8 steps: an edit takes about 9 s of
-sampling at 480 (one reference) and about 20 s at 720. Two references work at 480 only; 1080 is not
-supported. See [image modes](image-modes.md).
+sampling at 480 (one reference) and about 20 s at 720. Larger sizes and two references are accepted
+too (`MY_DIFFUSION_EDIT_LIMITS`), see below. See [image modes](image-modes.md).
 
 ## Large sizes: what limits them and what was measured
 
-The limits above (`EDIT_MAX_TIER` in `engine.py`, no 1440 tier) are the engine's rules, not the card's
-limit any more. Measured on the same 16 GB laptop GPU with 14.7 GB free, turbo, 8 steps, with
+The tiers that strict mode refuses above (`EDIT_MAX_TIER` in `engine.py`) are a policy, not the card's limit
+any more (see [configuration](configuration.md): `MY_DIFFUSION_EDIT_LIMITS`). There is still no 1440 tier in the
+presets; the table below lifted it for the measurements. Measured on the same 16 GB laptop GPU with 14.7 GB free, turbo, 8 steps, with
 `scripts/check_memory.py`, which lifts the rules for itself. Times are for the sampling alone; this
 session ran about 30% slower than the tables above (the laptop was in another power plan), so compare the
 rows with each other, not with those tables.
@@ -139,7 +140,13 @@ do not change. The product of a LoRA pair is rounded differently in pieces, whic
 another variant of its picture - so the MLP is cut only above 10000 tokens (`MLP_WHOLE_TOKENS`), longer
 than anything that fitted before: every picture that could be made before comes out bit for bit the same.
 
-**Streamed weights** (`Krea2Engine.stream_weights(n)`, not used by the engine on its own yet). A block's
+**Streamed weights** (`Krea2Engine.stream_weights(n)`). The engine now uses it on its own: before sampling it
+counts the sequence (text + picture + reference tokens), takes the free video memory from torch (plus what the
+network already holds on the GPU) and, if the rule of thumb below says the peak will not fit, streams the fewest
+blocks that fit plus one spare, with a 0.5 GB margin (`limits.plan_streaming`). After the job the previous
+state is put back, so the next small job does not pay for it. The job's result says how many blocks it used
+(`streamed_blocks`) and how long the sequence was (`tokens`). If a job still runs out of memory, it fails with a
+clear message, the memory is freed and the next job runs (`GenerationOutOfMemory`). A block's
 weights (0.42 GB) can stay in pinned RAM and be copied to the GPU only while that block runs, like the
 LoRA pairs with LoRA streaming. A copy takes about 22 ms, so one block costs 0.18 s per 8-step generation:
 1.2 s for 8 blocks, 5-6 s for all 28, at any size - and the picture is bit for bit the same. With all 28
