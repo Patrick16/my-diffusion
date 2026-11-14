@@ -13,6 +13,7 @@ The flow:
     GET  /result/{id}/image   -> the PNG, once the status is "done"
     POST /cancel/{id}         -> cancel: a waiting job at once, a running one at its next step
     GET  /jobs                -> your jobs (an admin sees everybody's)
+    POST /jobs/delete         -> delete finished jobs by a list of ids, with their pictures
 
 Settings at run time (admins only; see runtime_config.py and the bottom of this file):
     GET   /config             -> every setting: its value, where it comes from, how a change takes effect
@@ -49,6 +50,8 @@ from .jobs import JobNotCancellable, JobNotFound, QueueFull, Scheduler, Slot
 from .resolutions import all_combinations
 from .schemas import (
     ConfigChange,
+    DeleteJobsRequest,
+    DeleteJobsResponse,
     EnhancePromptRequest,
     EnhancePromptResponse,
     GenerateRequest,
@@ -756,6 +759,36 @@ async def list_jobs(
     positions = {job.id: i for i, job in enumerate(s.order(), start=1)}
     who = owner if caller.is_admin else caller.owner
     return [_job_info(job, positions) for job in s.store.list(who, limit)]
+
+
+@app.post("/jobs/delete", response_model=DeleteJobsResponse, tags=["jobs"], responses=_errors(401, 422))
+async def delete_jobs(request: DeleteJobsRequest, caller: CallerDep) -> DeleteJobsResponse:
+    """Deletes finished jobs (done, failed or cancelled) from the database, together with their result picture and
+    the pictures that were sent with them. Takes a list of job ids (up to 500) and always answers 200 with what
+    happened to each: `deleted`, `active` (still waiting or running: cancel them first, nothing is touched) and
+    `not_found` (no such job, or it belongs to someone else - the same answer, so ids cannot be probed).
+    Cannot be undone."""
+    s = _scheduler()
+    assert inputs is not None
+    found: dict[str, JobRecord] = {}
+    active: list[str] = []
+    not_found: list[str] = []
+    for job_id in dict.fromkeys(request.ids):   # the same id twice is one job
+        job = s.store.get(job_id)
+        if job is None or not caller.can_see(job.owner):
+            not_found.append(job_id)
+        elif not job.finished:
+            active.append(job_id)
+        else:
+            found[job_id] = job
+    deleted = s.store.delete_finished(list(found))   # a job that is no longer finished (cannot happen) is skipped here
+    for job_id in deleted:
+        job = found[job_id]
+        if job.image_name:
+            (settings.output_dir / job.image_name).unlink(missing_ok=True)
+        inputs.remove(job_id)
+    active += [job_id for job_id in found if job_id not in deleted]
+    return DeleteJobsResponse(deleted=deleted, active=active, not_found=not_found)
 
 
 # ---------------------------------------------------------------------- settings at run time

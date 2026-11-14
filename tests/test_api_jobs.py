@@ -195,6 +195,41 @@ def test_checkpoint_switch_is_refused_while_jobs_are_pending(client):
     client.post(f"/cancel/{slow_id}")
 
 
+# ---- batch delete ---------------------------------------------------------------------------------------------
+
+def test_batch_delete_removes_rows_and_pictures_and_reports_the_rest(client, tmp_path):
+    done_id = client.post("/generate", json={"prompt": "edit", "references": [png_b64()]}).json()["job_id"]
+    wait_for(client, done_id, lambda b: b["status"] == "done")
+    image = next((tmp_path / "outputs").iterdir())
+    assert image.is_file() and (tmp_path / "inputs" / done_id).is_dir()
+    slow_id = client.post("/generate", json={"prompt": "slow"}).json()["job_id"]
+    wait_for(client, slow_id, lambda b: b["status"] == "running")
+
+    response = client.post("/jobs/delete", json={"ids": [done_id, done_id, slow_id, "nope"]})
+    assert response.status_code == 200
+    assert response.json() == {"deleted": [done_id], "active": [slow_id], "not_found": ["nope"]}
+    assert client.get(f"/result/{done_id}").status_code == 404
+    assert not image.exists() and not (tmp_path / "inputs" / done_id).exists()
+    assert client.get(f"/result/{slow_id}").status_code == 200   # the running job is untouched
+
+    client.post(f"/cancel/{slow_id}")
+    wait_for(client, slow_id, lambda b: b["status"] == "cancelled")
+    assert client.post("/jobs/delete", json={"ids": [slow_id]}).json()["deleted"] == [slow_id]
+
+
+def test_batch_delete_needs_ids(client):
+    assert client.post("/jobs/delete", json={"ids": []}).status_code == 422
+
+
+def test_batch_delete_cannot_touch_someone_elses_job(secured):
+    job_id = secured.post("/generate", json={"prompt": "anna's"}, headers=bot("111")).json()["job_id"]
+    wait_for(secured, job_id, lambda b: b["status"] == "done", headers=bot("111"))
+    other = secured.post("/jobs/delete", json={"ids": [job_id]}, headers=bot("222"))
+    assert other.json() == {"deleted": [], "active": [], "not_found": [job_id]}
+    assert secured.get(f"/result/{job_id}", headers=bot("111")).status_code == 200
+    assert secured.post("/jobs/delete", json={"ids": [job_id]}, headers=WEB).json()["deleted"] == [job_id]   # admin may
+
+
 # ---- access ---------------------------------------------------------------------------------------------------
 
 def test_a_key_is_required_when_keys_are_configured(secured):

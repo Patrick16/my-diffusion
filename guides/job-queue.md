@@ -15,6 +15,7 @@ cancelled while it waits or while it runs. Jobs are stored in SQLite, so the que
 | Fetch | `GET /result/{job_id}/image` | the PNG, once the status is `done` (`409` before) |
 | Cancel | `POST /cancel/{job_id}` | the job; `409` if it has already finished |
 | List | `GET /jobs?limit=50` | your jobs, newest first; admins see everybody's (or `?owner=telegram:123`) |
+| Delete | `POST /jobs/delete` with `{"ids": [...]}` (up to 500) | finished jobs are removed from the database with their result and input pictures; always `200` with `deleted`, `active` (still waiting or running: skipped, cancel first) and `not_found` (missing or someone else's) |
 
 A request that is malformed (bad base64, `mask` without `init_image` ...) gets `400` at once and is not queued.
 Problems only the engine can see (an unknown LoRA, a size refused by `edit_limits: strict`, a GPU out of memory) make the job `failed`, with

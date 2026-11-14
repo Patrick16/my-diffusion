@@ -207,6 +207,16 @@ class JobStore:
             (job_id,),
         )
 
+    def delete_finished(self, job_ids: list[str]) -> list[str]:
+        """Deletes the rows of the jobs that have ended (done / failed / cancelled), in one transaction. A job
+        that is waiting or running is left alone, as is an id that does not exist. Returns the ids actually deleted."""
+        deleted: list[str] = []
+        with self._write() as db:
+            for job_id in job_ids:
+                if db.execute("DELETE FROM jobs WHERE id = ? AND status IN ('done', 'failed', 'cancelled')", (job_id,)).rowcount:
+                    deleted.append(job_id)
+        return deleted
+
     def fail_interrupted(self) -> list[str]:
         """Called at startup. A job still "running" means the server died in the middle of it (a crash, a kill,
         out of memory). It is marked failed, not run again: if that job is what killed the server, running it

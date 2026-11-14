@@ -33,6 +33,7 @@ four addresses.
 | `GET /result/{job_id}/image` | the finished PNG |
 | `POST /cancel/{job_id}` | cancel a waiting or running job |
 | `GET /jobs` | your jobs (an admin sees everybody's) |
+| `POST /jobs/delete` | delete finished jobs by a list of ids, with their pictures |
 
 All endpoints except `/health` and `/resolutions` need an API key once keys are configured; see
 [jobs, queue and access](job-queue.md).

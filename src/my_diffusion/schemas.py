@@ -133,6 +133,16 @@ class JobInfo(BaseModel):
     error: str | None = Field(default=None, description="Set when status is failed")
 
 
+class DeleteJobsRequest(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500, description="Job ids to delete")
+
+
+class DeleteJobsResponse(BaseModel):
+    deleted: list[str] = Field(description="Jobs removed from the database, with their pictures")
+    active: list[str] = Field(description="Skipped: still waiting or running (cancel them first)")
+    not_found: list[str] = Field(description="Skipped: no such job - or it belongs to someone else")
+
+
 class EnhancePromptRequest(BaseModel):
     prompt: str
     seed: int | None = None
