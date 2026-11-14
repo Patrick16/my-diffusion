@@ -529,6 +529,48 @@ def streamed_adapters(block: nn.Module, device: torch.device | str):
             m.adapters = []
 
 
+@contextmanager
+def streamed_weights(block: nn.Module, device: torch.device | str):
+    """Puts the weights of a block that lives in RAM on the device for the duration of the `with` body.
+
+    What and why. The network's weights are 12.6 GB, 0.42 GB per main block, and on a 16 GB card they leave
+    about 2 GB for everything a step computes. A long sequence (a large picture, an edit with references)
+    needs more. A block marked `weights_streamed` is therefore left at "home" (pinned RAM) when the network
+    moves to the GPU (memory.Resident.with_home_copy), and this manager copies its weights in right before
+    the block runs and drops them right after - the same as streamed_adapters does for the LoRA pairs. Every
+    block kept at home frees 0.42 GB for the whole generation.
+
+    The price is the copy on every step. Measured (scripts/check_memory.py, pinned memory): ~22 ms per block
+    and step, that is 0.18 s per block for an 8-step generation - 1.2 s for 8 blocks, 5-6 s for all 28,
+    whatever the picture size. From ordinary memory (pin_memory off) a copy is 6-8 times slower: see
+    pinned.py. The copies are non_blocking, queued ahead of the block's multiplications, and the dropped ones
+    go back to torch's cache, where the next block's copies of the same sizes reuse them. The bytes are the
+    same as with resident weights, so the picture is the same bit for bit (checked). A block that is not
+    streamed costs one attribute check."""
+    if not getattr(block, "weights_streamed", False):
+        yield
+        return
+    device = torch.device(device)
+    moved: list[tuple[nn.Module, str, str, torch.Tensor]] = []
+    for sub in block.modules():
+        for key, param in sub._parameters.items():
+            if param is not None and param.device != device:
+                moved.append((sub, "param", key, param.data))
+                param.data = param.data.to(device, non_blocking=True)
+        for key, buf in sub._buffers.items():
+            if buf is not None and buf.device != device:
+                moved.append((sub, "buffer", key, buf))
+                sub._buffers[key] = buf.to(device, non_blocking=True)
+    try:
+        yield
+    finally:
+        for sub, kind, key, home in moved:
+            if kind == "param":
+                sub._parameters[key].data = home
+            else:
+                sub._buffers[key] = home
+
+
 def set_matmul(model: nn.Module, mode: str, device: str) -> int:
     """Selects the multiplication mode for all layers of the model (see MATMUL_MODES). Returns how many
     layers will go the native fp8 path. The mode can be changed at any time; reloading the weights is not needed."""

@@ -277,13 +277,30 @@ class Krea2Engine:
         load_into(model, read_checkpoint(path, pin=pin))
         self.model = model
         self._applied_loras = []   # the freshly built network has no LoRAs attached
-        self.gpu.register("model", Resident.with_home_copy(model, pin=pin))
+        # stay_home: the blocks with streamed weights (stream_weights) are not moved with the rest of the network.
+        self.gpu.register("model", Resident.with_home_copy(
+            model, pin=pin, stay_home=lambda: [block for block in model.blocks if getattr(block, "weights_streamed", False)],
+        ))
         self.checkpoint_name = path.name
         self.checkpoint_file = path
         self._checkpoint_request = name
         logger.info("checkpoint %s in RAM: %.1fs", path.name, time.time() - t0)
         self.set_matmul(self.matmul)
         self.set_attention()
+
+    def stream_weights(self, blocks: int) -> None:
+        """Keeps the weights of `blocks` of the network's 28 main blocks in RAM instead of the GPU: each frees
+        0.42 GB of video memory for the activations of a long sequence and is copied in for the moment it runs
+        (weights.streamed_weights). 0 (the state after loading a checkpoint) - the whole network on the GPU.
+
+        Not used by generate() on its own yet: nothing within the engine's size limits needs it. It is the
+        mechanism for sizes above them (measured by scripts/check_memory.py: 4 blocks are enough for a 1440p
+        edit with one reference, 29 thousand tokens, on a 16 GB card). Call it between generations."""
+        if self.model.streamed_weight_blocks == blocks:
+            return
+        if self.gpu.active == "model":
+            self.gpu.release()   # the marks are read on the way to the GPU: the next generation moves the network anew
+        self.model.stream_weights(blocks)
 
     def set_attention(self) -> None:
         """Sets the attention kernel from the settings on the loaded network. Like the matmul mode, it can be

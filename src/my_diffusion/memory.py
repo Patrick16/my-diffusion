@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable
+from typing import Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -40,12 +40,18 @@ class Resident:
         return cls(lambda device: module.to(device), lambda: module.to("cpu"))
 
     @classmethod
-    def with_home_copy(cls, module: nn.Module, pin: bool = False) -> "Resident":
+    def with_home_copy(
+        cls, module: nn.Module, pin: bool = False, stay_home: Callable[[], Iterable[nn.Module]] | None = None,
+    ) -> "Resident":
         """Fast variant: the RAM copy stays in place (see the module description).
 
         pin=True: the "home" must live in pinned memory - transfers to the GPU from it are several times
         faster (see pinned.py). Tensors that are not pinned yet (the checkpoint was read without
-        pin, or it is a .gguf) are moved into pinned memory here."""
+        pin, or it is a .gguf) are moved into pinned memory here.
+
+        stay_home - asked on every move to the GPU: the parts of `module` whose tensors are NOT moved and
+        stay at home. Those parts bring their weights to the GPU themselves, for the moment they run (the
+        network's blocks with streamed weights, see weights.streamed_weights)."""
         home: list[tuple[nn.Module, str, str, torch.Tensor]] = []
         for sub in module.modules():
             for key, param in sub._parameters.items():
@@ -65,12 +71,15 @@ class Resident:
                 else:
                     sub._buffers[key] = tensor
 
+        def to_gpu(device: str) -> None:
+            kept = set()
+            for part in stay_home() if stay_home is not None else ():
+                kept.update(id(sub) for sub in part.modules())
+            place([t if id(sub) in kept else t.to(device, non_blocking=True) for sub, _, _, t in home])
+
         if pin:
             place([t for _, _, _, t in home])   # the module now points at the pinned copies
-        return cls(
-            to_gpu=lambda device: place([t.to(device, non_blocking=True) for _, _, _, t in home]),
-            to_cpu=lambda: place([t for _, _, _, t in home]),
-        )
+        return cls(to_gpu=to_gpu, to_cpu=lambda: place([t for _, _, _, t in home]))
 
 
 class GpuSlot:

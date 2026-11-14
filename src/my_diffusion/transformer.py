@@ -28,7 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from .weights import QLinear, shared_input, streamed_adapters
+from .weights import QLinear, shared_input, streamed_adapters, streamed_weights
 
 # Which kernel computes attention.
 #
@@ -115,6 +115,50 @@ def _param(*shape: int) -> nn.Parameter:
     return nn.Parameter(torch.zeros(*shape), requires_grad=False)
 
 
+# Working memory of one block.
+#
+# The weights take 12.6 GB of a 16 GB card, so what a block needs while it runs decides which sizes fit. Call
+# the stream itself - (tokens, 6144) in bf16, 12 KB per token - one "unit": 100 MB at 1080p, 205 MB for a 1080p
+# edit with one reference (16.7 thousand tokens). Computed in one piece, three places need many units at once:
+#   - the MLP: its hidden layer is 2.67 units wide, and gate, up and their product exist together: ~11 units;
+#   - RoPE on the queries: float32 copies of the queries and of both products: ~8 units;
+#   - the normalizations, which also work in float32: ~4 units.
+# At 16.7 thousand tokens that is 2.3 GB for a moment, and the edit does not fit. But all three work on each
+# token separately, so they can go over the sequence in pieces of CHUNK_TOKENS tokens and write the pieces into
+# one result, and the working memory of these three no longer grows with the picture (~0.55 GB at most).
+# Measured (scripts/check_memory.py): a 1080p edit with one reference, a 720p edit with two and 1440p
+# text-to-image fit a 16 GB card this way, in the same time; before they ran out of memory on the first step.
+#
+# Are the numbers the same? The normalizations and RoPE: yes, bit for bit, they are computed element by element.
+# The MLP is matrix products. The compressed (fp8) product gives the same bits whole and in pieces, so
+# text-to-image pictures do not change. The product of a LoRA pair is an ordinary bf16 one, and there the GPU
+# library rounds a piece differently from the whole: with a LoRA attached (every edit has one) the same seed
+# gives another variant of the picture, as far from the old one as after a change of the attention kernel.
+# So the MLP goes in pieces only above MLP_WHOLE_TOKENS, a length no request reached before (the longest that
+# fitted were ~8.5 thousand tokens: 1080p text-to-image, a 720p edit with one reference): every picture that
+# could be made before comes out the same, and only the new sizes are computed in pieces.
+CHUNK_TOKENS = 4096
+MLP_WHOLE_TOKENS = 10000
+
+
+def in_chunks(fn, x: torch.Tensor, size: int | None = None, dim: int = -2) -> torch.Tensor:
+    """fn(x), computed over slices of x along `dim` (the token axis) of at most `size` (CHUNK_TOKENS by default)
+    and written into one result. fn must work on every slice independently and keep `dim` in its place."""
+    size = CHUNK_TOKENS if size is None else size
+    n = x.shape[dim] if x.dim() >= -dim else 0
+    if n <= size:
+        return fn(x)
+    out = None
+    for start in range(0, n, size):
+        piece = fn(x.narrow(dim, start, min(size, n - start)))
+        if out is None:
+            shape = list(piece.shape)
+            shape[dim] = n
+            out = piece.new_empty(shape)
+        out.narrow(dim, start, piece.shape[dim]).copy_(piece)
+    return out
+
+
 class RMSNorm(nn.Module):
     """RMS normalization. A peculiarity of Krea 2: the file stores not the multiplier itself
     but its deviation from one, that is, the real weight = 1 + scale."""
@@ -125,8 +169,13 @@ class RMSNorm(nn.Module):
         self.scale = _param(dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # compute in float32: a sum of squares over 6144 numbers loses precision in bf16
-        return F.rms_norm(x.float(), (x.shape[-1],), weight=self.scale.float() + 1.0, eps=self.eps).to(x.dtype)
+        weight = self.scale.float() + 1.0
+
+        def norm(part: torch.Tensor) -> torch.Tensor:
+            # compute in float32: a sum of squares over 6144 numbers loses precision in bf16
+            return F.rms_norm(part.float(), (part.shape[-1],), weight=weight, eps=self.eps).to(part.dtype)
+
+        return in_chunks(norm, x)   # the float32 copies only of one piece at a time, see CHUNK_TOKENS
 
 
 class QKNorm(nn.Module):
@@ -148,8 +197,13 @@ class SwiGLU(nn.Module):
         self.down = QLinear(hidden, features, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = shared_input(x, self.gate, self.up)   # gate and up share one input: prepare it for the fp8 multiplication once
-        return self.down(F.silu(self.gate(x)) * self.up(x))
+        def mlp(part: torch.Tensor) -> torch.Tensor:
+            part = shared_input(part, self.gate, self.up)   # gate and up share one input: prepare it for the fp8 multiplication once
+            return self.down(F.silu(self.gate(part)) * self.up(part))
+
+        if x.shape[-2] <= MLP_WHOLE_TOKENS:
+            return mlp(x)
+        return in_chunks(mlp, x)   # the wide hidden layer only of one piece at a time, see CHUNK_TOKENS
 
 
 # --- RoPE: the token position is encoded by rotating coordinate pairs in queries and keys ---
@@ -168,9 +222,20 @@ def build_rope(pos: torch.Tensor, axes: tuple[int, ...], theta: float) -> torch.
 
 def apply_rope(x: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
     """x: (B, heads, N, 128). Rotates each pair of adjacent coordinates by its own angle."""
-    pairs = x.float().reshape(*x.shape[:-1], -1, 1, 2)
-    out = rope[..., 0] * pairs[..., 0] + rope[..., 1] * pairs[..., 1]
-    return out.reshape(x.shape).to(x.dtype)
+
+    def rotate(part: torch.Tensor, rot: torch.Tensor) -> torch.Tensor:
+        pairs = part.float().reshape(*part.shape[:-1], -1, 1, 2)
+        out = rot[..., 0] * pairs[..., 0] + rot[..., 1] * pairs[..., 1]
+        return out.reshape(part.shape).to(part.dtype)
+
+    n = x.shape[-2]
+    if n <= CHUNK_TOKENS:
+        return rotate(x, rope)
+    out = torch.empty_like(x)   # in pieces: the float32 copies only of one piece at a time, see CHUNK_TOKENS
+    for start in range(0, n, CHUNK_TOKENS):
+        length = min(CHUNK_TOKENS, n - start)
+        out.narrow(-2, start, length).copy_(rotate(x.narrow(-2, start, length), rope.narrow(2, start, length)))
+    return out
 
 
 class Attention(nn.Module):
@@ -194,9 +259,13 @@ class Attention(nn.Module):
         q = self.wq(x).view(b, n, self.heads, self.headdim).transpose(1, 2)
         k = self.wk(x).view(b, n, self.kvheads, self.headdim).transpose(1, 2)
         v = self.wv(x).view(b, n, self.kvheads, self.headdim).transpose(1, 2)
-        q, k = self.qknorm.qnorm(q), self.qknorm.knorm(k)
+        # One statement per tensor, and `del` below: a tensor that is no longer needed must not wait for the
+        # end of the function, each of them is a whole "unit" of working memory (see CHUNK_TOKENS).
+        q = self.qknorm.qnorm(q)
+        k = self.qknorm.knorm(k)
         if rope is not None:
-            q, k = apply_rope(q, rope), apply_rope(k, rope)
+            q = apply_rope(q, rope)
+            k = apply_rope(k, rope)
         if self.kvheads != self.heads:
             rep = self.heads // self.kvheads
             k = k.repeat_interleave(rep, dim=1)
@@ -208,9 +277,15 @@ class Attention(nn.Module):
                 out = F.scaled_dot_product_attention(q, k, v)
         else:
             out = F.scaled_dot_product_attention(q, k, v)
+        del q, k, v
         out = out.transpose(1, 2).reshape(b, n, self.heads * self.headdim)
-        # the attention output is additionally weighted by a sigmoid gate
-        return self.wo(out * torch.sigmoid(self.gate(x)))
+        # the attention output is additionally weighted by a sigmoid gate. In place: `out` and the gate are
+        # fresh tensors of this call, and each copy of them would be one more unit of working memory.
+        gate = self.gate(x).sigmoid_()
+        del x
+        out = out.mul_(gate)
+        del gate
+        return self.wo(out)
 
 
 class TextFusionBlock(nn.Module):
@@ -339,6 +414,21 @@ class Krea2Transformer(nn.Module):
         and keep their pairs on the GPU, as without streaming (lora.apply_loras)."""
         return [*self.blocks, *self.txtfusion.layerwise_blocks, *self.txtfusion.refiner_blocks]
 
+    def stream_weights(self, blocks: int) -> None:
+        """Keeps the weights of the first `blocks` main blocks in RAM instead of the GPU: 0.42 GB of video memory
+        each, for ~0.18 s per 8-step generation (weights.streamed_weights). 0 - the whole network on the GPU.
+
+        Only marks the blocks: the mark is read when the network moves to the GPU (memory.Resident.with_home_copy
+        with stay_home=...), so change it while the network is in RAM (the engine does: Krea2Engine.stream_weights)."""
+        if not 0 <= blocks <= len(self.blocks):
+            raise ValueError(f"blocks must be between 0 and {len(self.blocks)}, got {blocks}")
+        for i, block in enumerate(self.blocks):
+            block.weights_streamed = i < blocks
+
+    @property
+    def streamed_weight_blocks(self) -> int:
+        return sum(1 for block in self.blocks if getattr(block, "weights_streamed", False))
+
     @property
     def dtype(self) -> torch.dtype:
         return torch.bfloat16
@@ -399,7 +489,9 @@ class Krea2Transformer(nn.Module):
 
         x = torch.cat((txt, img), dim=1)
         for block in self.blocks:
-            with streamed_adapters(block, x.device):   # LoRA streaming: this block's pairs only, see streamed_blocks
+            # A block whose weights live in RAM gets them for this call only (stream_weights); the same for
+            # its LoRA pairs with LoRA streaming (streamed_blocks).
+            with streamed_weights(block, x.device), streamed_adapters(block, x.device):
                 x = block(x, tvec, rope)
 
         if refs:   # drop the reference tokens; only the generated picture is the output
