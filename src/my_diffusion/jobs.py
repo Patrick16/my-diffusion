@@ -38,13 +38,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .cancellation import GenerationCancelled
+from .limits import GenerationOutOfMemory
 from .store import JobRecord, JobStore
 
 logger = logging.getLogger(__name__)
 
 # Failures that are the request's fault (bad size, unknown LoRA ...): logged in one line, without a stack trace.
 # Anything else is a server problem and is logged with its traceback.
-_REQUEST_ERRORS = (ValueError, FileNotFoundError, NotImplementedError)
+_REQUEST_ERRORS = (ValueError, FileNotFoundError, NotImplementedError, GenerationOutOfMemory)
 
 
 class QueueFull(Exception):

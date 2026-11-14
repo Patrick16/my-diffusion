@@ -193,6 +193,22 @@ class Settings(BaseSettings):
         2, apply="live", group="editing", ge=0, description="Maximum number of reference pictures in a request",
     )
 
+    # What to do with a size of an edit (references, outpaint) above what fitted the 16 GB card without help
+    # (one reference up to 720, two at 480; limits.py): strict refuses it, warn accepts it and the job carries a
+    # warning with a rough time, off accepts it silently. Large sizes run by streaming the network's blocks from
+    # RAM (engine.py picks the number from the free video memory); they are slower, not impossible.
+    edit_limits: Literal["strict", "warn", "off"] = _setting(
+        "warn", apply="live", group="editing",
+        description="Edits above the sizes that fit the card without streaming: strict = refuse, warn = accept with "
+        "a warning in the job, off = accept silently",
+    )
+    # A hard cap on the output frame of an edit, in pixels, in every mode of edit_limits: for a server where one job
+    # must not cost more than N seconds of GPU. 1920x1088 is 2.1 million; None = no cap.
+    edit_max_pixels: int | None = _setting(
+        None, apply="live", group="editing", ge=1,
+        description="Largest output frame of an edit or outpaint, in pixels (1920x1088 = 2088960); empty = no cap",
+    )
+
     # --- background removal (background.py) ---
     rembg_model: str = _setting(   # file in models/ (u2net ONNX, run by onnxruntime on the CPU)
         "rembg/u2net.onnx", apply="live", group="editing",

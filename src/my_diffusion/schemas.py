@@ -93,6 +93,9 @@ class GenerationResult(BaseModel):
     remove_background: str = Field(default="none", description="'subjects' if the background of some references was removed")
     keep_original: bool = Field(default=False, description="True if reference 1's pixels were kept in an outpaint")
     edit_lora_rank: int | None = None
+    tokens: int | None = Field(default=None, description="Length of the network's sequence: text + picture + reference tokens")
+    streamed_blocks: int = Field(default=0, description="Network blocks that ran with weights streamed from RAM to fit the video memory (slower, same picture)")
+    warnings: list[str] = Field(default_factory=list, description="Why the job is unusual: for example an edit accepted only because edit_limits is 'warn', with a rough time")
 
 
 class GenerateResponse(GenerationResult):
@@ -123,6 +126,7 @@ class JobInfo(BaseModel):
         description="The pictures sent with the job, name -> URL: 'init', 'mask', 'ref1', 'ref2'. Kept for a limited "
         "time (MY_DIFFUSION_INPUTS_KEEP_DAYS); an expired one answers 404",
     )
+    warnings: list[str] = Field(default_factory=list, description="The same as result.warnings, so that a client need not open the result: a large edit accepted by the policy (edit_limits) and about how long it takes")
     error: str | None = Field(default=None, description="Set when status is failed")
 
 

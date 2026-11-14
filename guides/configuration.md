@@ -67,7 +67,16 @@ Details: [jobs, queue and access](job-queue.md).
 | `MY_DIFFUSION_EDIT_LORA_WEIGHT` | `1.0` | `live` | its weight; a request can name the LoRA itself, weight 0 switches it off |
 | `MY_DIFFUSION_VISION_MAX_SIDE` | `768` | `live` | longer side of a picture before the vision tower |
 | `MY_DIFFUSION_MAX_REFERENCES` | `2` | `live` | maximum number of reference pictures |
+| `MY_DIFFUSION_EDIT_LIMITS` | `warn` | `live` | what to do with an edit or outpaint above 720 (one reference) / 480 (two): `strict` refuses it, `warn` accepts it and the job carries a `warnings` entry with a rough time, `off` accepts it silently |
+| `MY_DIFFUSION_EDIT_MAX_PIXELS` | empty | `live` | a hard cap on the output frame of an edit or outpaint, in pixels (1920x1088 = 2088960), in every `EDIT_LIMITS` mode; empty = no cap |
 | `MY_DIFFUSION_REMBG_MODEL` | `rembg/u2net.onnx` | `live` | background-removal model in `models/` |
+
+Large sizes run because the engine streams as many blocks of the network from RAM as the free video memory
+requires (about 0.18 s per block per 8-step generation; the picture does not change); see
+[performance](performance.md#large-sizes-what-limits-them-and-what-was-measured). `EDIT_LIMITS` only decides
+whether a size is allowed. `warn` is the default for a private server; on a public one use `strict`, or `warn`
+with an `EDIT_MAX_PIXELS` that is the most a job may cost (a 1080p edit with two references takes about two
+minutes of GPU, 1440p about three). Both apply to the next job without a restart. `GET /health` shows them.
 
 ## Server
 

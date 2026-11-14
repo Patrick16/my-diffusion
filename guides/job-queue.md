@@ -9,7 +9,7 @@ cancelled while it waits or while it runs. Jobs are stored in SQLite, so the que
 | Step | Request | Answer |
 |---|---|---|
 | Submit | `POST /generate` (same body as before) | `202` with the job: `job_id`, `status`, `position` |
-| Poll | `GET /result/{job_id}` | the job: status, position, progress (`step` / `total_steps`), `result`, `image_url`, `error` |
+| Poll | `GET /result/{job_id}` | the job: status, position, progress (`step` / `total_steps`), `result`, `image_url`, `warnings`, `error` |
 | Watch | `GET /result/{job_id}/events` | the same job, pushed as server-sent events (see below) |
 | Inputs | `GET /result/{job_id}/inputs/{name}` | a picture sent with the job (`init`, `mask`, `ref1`, `ref2`), for 7 days; the names are listed in `inputs` of the job |
 | Fetch | `GET /result/{job_id}/image` | the PNG, once the status is `done` (`409` before) |
@@ -17,7 +17,7 @@ cancelled while it waits or while it runs. Jobs are stored in SQLite, so the que
 | List | `GET /jobs?limit=50` | your jobs, newest first; admins see everybody's (or `?owner=telegram:123`) |
 
 A request that is malformed (bad base64, `mask` without `init_image` ...) gets `400` at once and is not queued.
-Problems only the engine can see (an unknown LoRA, a size that does not fit the GPU) make the job `failed`, with
+Problems only the engine can see (an unknown LoRA, a size refused by `edit_limits: strict`, a GPU out of memory) make the job `failed`, with
 the reason in `error`. A full queue answers `429`.
 
 ## Events instead of polling
@@ -60,7 +60,7 @@ queued -> cancelled               (cancelled while waiting: never touches a GPU)
 |---|---|
 | `queued` | Waiting. `position` 1 is the next job to start |
 | `running` | Being generated. `step` / `total_steps` show the sampler's progress. `cancel_requested: true` means it is stopping |
-| `done` | Finished; `result` has the size, seed, timings ...; the picture is at `image_url` |
+| `done` | Finished; `result` has the size, seed, timings ...; the picture is at `image_url`. `warnings` (also in `result`) is empty unless the job is unusual: for example a large edit accepted by `edit_limits: warn`, with about how long it takes; `result.streamed_blocks` is how many network blocks were streamed to fit the memory |
 | `failed` | `error` says why. Also used for a job that was running when the server crashed |
 | `cancelled` | Stopped by a cancel. No picture is kept |
 
@@ -167,6 +167,6 @@ Without keys configured, leave out `$headers`.
 
 - No automatic clean-up of old jobs and pictures.
 - `/enhance-prompt` is not queued: it runs on the first GPU's thread between jobs.
-- Size limits of reference editing and outpainting: one reference goes up to the 720 tier, two only at 480, and 1080 is not supported, because the network, the edit LoRA and the reference tokens must fit into 16 GB of VRAM together (`EDIT_MAX_TIER` in `engine.py`). Planned: stop refusing these sizes and only warn that they are slower (the web UI already shows such a warning), and look for ways to optimize editing so that large sizes and two references run fast without limits (memory use of the LoRA and reference tokens, offloading, attention).
+- Size limits of reference editing and outpainting are a policy now (`MY_DIFFUSION_EDIT_LIMITS`, `MY_DIFFUSION_EDIT_MAX_PIXELS`, see [configuration](configuration.md)): large sizes run by streaming network blocks, a job accepted only because of the policy gets `warnings`, and a CUDA out-of-memory error fails just that job. Left: the limits are the same for every client (no "admins unlimited, services strict": the engine does not know who asked, so it would need the owner passed down with each job); the free-memory measurement is done once per job and trusts the rule of thumb, which was measured on one card; the warning is made when the job runs, not when it is submitted (the size of `aspect_ratio: auto` and outpaint frames is known only to the engine), so a queued job has no warning yet; VAE tiling and cheaper references are not done.
 - The scheduler lives inside the API process. Separate worker machines would need a shared database (Postgres)
   instead of the SQLite file.
