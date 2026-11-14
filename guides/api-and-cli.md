@@ -82,7 +82,7 @@ uv run my-diffusion-generate "a fox in the snow, golden hour" --resolution 720 -
 | `--enhance` | expand the prompt with Qwen first |
 | `--checkpoint` | file in the checkpoints folder (`models/checkpoints` unless set otherwise) |
 | `--matmul`, `--attention` | override the modes from the settings (see [performance](performance.md)) |
-| `--init-image`, `--strength`, `--mask`, `--feather` | image-to-image and inpaint |
+| `--init-image`, `--strength`, `--mask`, `--feather`, `--inpaint-iterations` | image-to-image and inpaint |
 | `--reference` (up to 2), `--reference-mode`, `--outpaint T B L R`, `--keep-original`, `--remove-background` | reference editing; see [image modes](image-modes.md) |
 
 Full help: `uv run my-diffusion-generate --help`.

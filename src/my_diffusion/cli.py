@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import load_settings
 from .engine import Krea2Engine
 from .imaging import load_rgb
+from .langevin import MAX_ITERATIONS
 from .resolutions import ASPECT_RATIOS, RESOLUTION_TIERS
 from .transformer import ATTENTION_KERNELS
 from .weights import MATMUL_MODES
@@ -48,6 +49,7 @@ def main() -> None:
     parser.add_argument("--strength", type=float, default=None, help="with --init-image: how much to change the picture, 0 < strength <= 1 (default 0.6 for image-to-image, 1.0 for inpaint; 1.0 = start from pure noise)")
     parser.add_argument("--mask", type=Path, default=None, metavar="PATH", help="inpaint (needs --init-image): white = regenerate, black = keep; cropped like the picture")
     parser.add_argument("--feather", type=int, default=2, help="inpaint only: soft mask edge in latent pixels, 1 = 8 image pixels (default 2; 0 = hard edge)")
+    parser.add_argument("--inpaint-iterations", type=int, default=0, choices=range(MAX_ITERATIONS + 1), metavar=f"0..{MAX_ITERATIONS}", help="with --mask: extra network calls before every step that make the new area agree with the kept one (default 0 = off; 2 to complete a part of an object, about 2.5 times slower)")
     parser.add_argument("--reference", action="append", type=Path, default=[], metavar="PATH", help="reference editing, can be given up to 2 times: 1 = the scene, 2 = a subject or person; with --init-image it is added after the init picture, which is image 1 (at most 1 then)")
     parser.add_argument("--reference-mode", choices=["scene", "subjects"], default="scene", help="'scene': --reference 1 is the main scene, the rest are people / objects; 'subjects': all references are people / objects")
     parser.add_argument("--outpaint", nargs=4, type=float, default=None, metavar=("TOP", "BOTTOM", "LEFT", "RIGHT"), help="extend reference 1 by these percentages of its sides and generate the new area (needs --reference, scene mode; replaces --aspect-ratio)")
@@ -76,6 +78,8 @@ def main() -> None:
             parser.error("--outpaint cannot be combined with --init-image")
     if args.aspect_ratio == "auto" and not args.reference:
         parser.error("--aspect-ratio auto needs --reference")
+    if args.inpaint_iterations and args.mask is None:
+        parser.error("--inpaint-iterations needs --mask")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
@@ -110,6 +114,7 @@ def main() -> None:
             strength=args.strength,
             mask=mask,
             feather=args.feather,
+            inpaint_iterations=args.inpaint_iterations,
             references=references,
             reference_mode=args.reference_mode,
             outpaint=None if args.outpaint is None else tuple(args.outpaint),
@@ -125,7 +130,7 @@ def main() -> None:
             if result["remove_background"] != "none":
                 mode += f" remove_background={result['remove_background']}"
         elif result["mode"] == "inpaint":
-            mode = ", inpaint"
+            mode = ", inpaint" + (f" iterations={result['inpaint_iterations']}" if result["inpaint_iterations"] else "")
         elif result["mode"] == "image2image":
             mode = f", image2image strength={result['strength']}"
         else:

@@ -116,6 +116,7 @@ def sample(
     post_step: Callable[[torch.Tensor, float], torch.Tensor] | None = None,
     refs: list[tuple[torch.Tensor, tuple[int, int]]] | None = None,
     cancel_event: threading.Event | None = None,
+    pre_step: Callable[[torch.Tensor, float, Callable[[torch.Tensor], torch.Tensor]], torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Returns the latent of the finished image (in the model's normalized space).
 
@@ -139,6 +140,12 @@ def sample(
     post_step(x, sigma_next) is called after each Euler step and returns the x to continue with.
     sigma_next is the noise level of the NEW x (0.0 after the last step). Inpainting uses it to put
     the kept part of the picture back on its original line: add_noise(image_latent, noise, sigma_next).
+
+    pre_step(x, sigma, velocity) is called before every Euler step except the last one and returns the x
+    the step is taken from. sigma is the noise level x is at, and velocity(x) is the network's prediction
+    at that level for any x (with CFG when this step is guided; the cancel event is checked before each
+    call). The inpaint refinement uses it to move x around on the level before the step (langevin.py).
+    It is skipped on the last step: after it nothing looks at the result but the VAE.
 
     refs - reference editing: (clean latent, offset) pairs handed unchanged to every network call,
     conditional and unconditional alike (see Krea2Transformer.forward). They are context only: the
@@ -165,11 +172,19 @@ def sample(
         cancellation.checkpoint(cancel_event)
         sigma, sigma_next = sigmas[i], sigmas[i + 1]
         s = torch.full((x.shape[0],), sigma, device=x.device, dtype=torch.float32)
-        v = model(x, s, cond, **extra).float()
-        if use_cfg and first_guided <= i < last_guided:
-            v_uncond = model(x, s, uncond, **extra).float()
-            v = v_uncond + guidance_scale * (v - v_uncond)
-        x = x + (sigma_next - sigma) * v
+        guided = use_cfg and first_guided <= i < last_guided
+
+        def velocity(at: torch.Tensor, s=s, guided=guided) -> torch.Tensor:
+            cancellation.checkpoint(cancel_event)
+            v = model(at, s, cond, **extra).float()
+            if guided:
+                v_uncond = model(at, s, uncond, **extra).float()
+                v = v_uncond + guidance_scale * (v - v_uncond)
+            return v
+
+        if pre_step is not None and i < steps - 1:
+            x = pre_step(x, sigma, velocity)
+        x = x + (sigma_next - sigma) * velocity(x)
         if post_step is not None:
             x = post_step(x, sigma_next)
         if on_step is not None:

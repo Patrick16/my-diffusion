@@ -28,7 +28,7 @@ from typing import Callable
 import torch
 from PIL import Image
 
-from . import background, cancellation, imaging, limits, sampler
+from . import background, cancellation, imaging, langevin, limits, sampler
 from .config import Settings, inside_folder
 from .imaging import cover_crop
 from .lora import LoraFile, apply_loras, load_lora, truncate_rank
@@ -479,6 +479,7 @@ class Krea2Engine:
         cancel_event: threading.Event | None = None,
         on_progress: Callable[[int, int], None] | None = None,
         output_name: str | None = None,
+        inpaint_iterations: int = 0,
     ) -> dict:
         """cancel_event / on_progress - used by the job queue (see cancellation.py and jobs.py). The event is
         checked at the safe points of the run and raises GenerationCancelled; on_progress(done, total) is
@@ -504,6 +505,12 @@ class Krea2Engine:
         level, so only the white area is really generated. Default strength for inpaint is 1.0: the
         white area starts from pure noise and is not tied to what was there before; a lower strength
         keeps a hint of the old content inside the mask (useful to recolour or restyle, not to replace).
+        inpaint_iterations - only with a mask: that many extra network calls before every step but the last,
+        which let the white area and the kept area agree on one picture (langevin.py). 0 = off, the plain
+        blend above. 2 is the value to use when a part of an object has to be completed from the part that
+        is kept (without it the network tends to draw a second head or an extra leg); it makes sampling
+        about 2.5 times longer. For filling a large hole with background leave it at 0: there it is no
+        better, and from 5 up it draws a separate picture inside the mask.
 
         references - reference editing: 1 or 2 pictures (settings.max_references) the result is built
         from; the prompt says what to do with them ("put the cat from image 1 on a bridge"). Reference 1 is
@@ -547,6 +554,7 @@ class Krea2Engine:
                     prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras or [], enhance,
                     tuple(guidance_interval), init_image, strength, mask, feather, list(references or []), reference_mode,
                     outpaint, remove_background, keep_original, cancel_event, on_progress, output_name,
+                    inpaint_iterations=inpaint_iterations,
                 )
             except Exception as exc:
                 if not limits.is_out_of_memory(exc):
@@ -579,7 +587,7 @@ class Krea2Engine:
         self, prompt, negative_prompt, resolution, aspect_ratio, seed, steps, guidance_scale, shift, loras, enhance, guidance_interval,
         init_image=None, strength=None, mask=None, feather=2, references=None, reference_mode="scene",
         outpaint=None, remove_background="none", keep_original=False, cancel_event=None, on_progress=None,
-        output_name=None,
+        output_name=None, inpaint_iterations=0,
     ) -> dict:
         s = self.settings
         if reference_mode not in REFERENCE_MODES:
@@ -653,6 +661,10 @@ class Krea2Engine:
         self._run_size = (width, height, 0)   # for the out-of-memory message; the tokens are filled in below
         if mask is not None and init_image is None:
             raise ValueError("a mask needs an init image: inpaint regenerates the white part of the mask in a given picture")
+        if not 0 <= inpaint_iterations <= langevin.MAX_ITERATIONS:
+            raise ValueError(f"inpaint_iterations must be from 0 to {langevin.MAX_ITERATIONS}, got {inpaint_iterations}")
+        if inpaint_iterations and mask is None:
+            raise ValueError("inpaint_iterations refines an inpaint, so it needs a mask (and an init image)")
         if init_image is not None:
             if strength is None:
                 strength = 1.0 if mask is not None else 0.6
@@ -810,13 +822,18 @@ class Krea2Engine:
                 known = sampler.add_noise(latent0, noise, sigma_next)
                 return weight * x + (1.0 - weight) * known
 
+        pre_step = None
+        if inpaint_iterations:
+            # Same seed as the starting noise (the module salts it, so the two noises differ).
+            pre_step = langevin.LangevinInpaint(latent0, weight, noise_seed, inpaint_iterations)
+
         t0 = time.time()
         torch.cuda.reset_peak_memory_stats()
         latent = sampler.sample(
             self.model, start, cond.to(s.device), sigmas,
             uncond=None if uncond is None else uncond.to(s.device), guidance_scale=guidance_scale,
             guidance_interval=guidance_interval, post_step=post_step, refs=refs,
-            on_step=on_progress, cancel_event=cancel_event,
+            on_step=on_progress, cancel_event=cancel_event, pre_step=pre_step,
         )
         # No extra composite after the loop: the last post_step already puts latent0 back outside the mask
         # (sigma_next = 0). A second blend would apply the feathered weight twice on the soft edge.
@@ -853,6 +870,7 @@ class Krea2Engine:
             "mode": "edit" if references and init_image is None else "text2image" if init_image is None else ("inpaint" if mask is not None else "image2image"),
             "strength": None if init_image is None else strength,
             "feather": None if mask is None else feather,
+            "inpaint_iterations": inpaint_iterations,
             "references": user_references,
             "reference_mode": reference_mode if references else None,
             "outpaint": None if margins is None else dict(margins._asdict()),
