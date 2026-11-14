@@ -25,6 +25,7 @@ the libraries or on another machine. Scripts that need the GPU and the models ar
 | `scripts/check_loras.py` | which LoRAs are read, which are not, and why |
 | `scripts/check_checkpoints.py` | every checkpoint produces an image |
 | `scripts/check_outpaint.py` | the three reference features on the GPU (saves pictures to `outputs/`) |
+| `scripts/check_memory.py`, `check_vae_sizes.py`, `check_reference_cost.py` | video memory and time of the large sizes (edits, outpaint, 1440p) stage by stage, with streamed weights; the VAE whole and tiled up to 4K; cheaper reference tokens (an experiment) |
 | `scripts/check_keep_original.py`, `check_background.py`, `check_edit.py`, `check_rank.py`, `check_vae_roundtrip.py` | keep-original outpainting, background removal, reference editing, LoRA rank, VAE round-trip floor |
 | `scripts/profile_step.py` | where the step time goes; with `--real` - a comparison of the multiplication modes on the real checkpoint |
 | `scripts/compare_checkpoints.py` | how the checkpoints differ from the base one layer by layer, and whether the difference is low-rank |
