@@ -110,8 +110,8 @@ too (`MY_DIFFUSION_EDIT_LIMITS`), see below. See [image modes](image-modes.md).
 ## Large sizes: what limits them and what was measured
 
 The tiers that strict mode refuses above (`EDIT_MAX_TIER` in `engine.py`) are a policy, not the card's limit
-any more (see [configuration](configuration.md): `MY_DIFFUSION_EDIT_LIMITS`). There is still no 1440 tier in the
-presets; the table below lifted it for the measurements. Measured on the same 16 GB laptop GPU with 14.7 GB free, turbo, 8 steps, with
+any more (see [configuration](configuration.md): `MY_DIFFUSION_EDIT_LIMITS`). The 1440 tier is a preset now
+(see [resolutions](resolutions.md)). Measured on the same 16 GB laptop GPU with 14.7 GB free, turbo, 8 steps, with
 `scripts/check_memory.py`, which lifts the rules for itself. Times are for the sampling alone; this
 session ran about 30% slower than the tables above (the laptop was in another power plan), so compare the
 rows with each other, not with those tables.

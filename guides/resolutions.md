@@ -12,7 +12,7 @@ are multiples of 16.
 | 21:9 | 976x416 | 1472x624 | 2192x944 | 2928x1264 |
 | 1:1 | 640x640 | 960x960 | 1440x1440 | 1920x1920 |
 
-The 1440 tier (about 3.7 MP, 14 400 tokens) runs text-to-image on a 16 GB card in about a minute; reference editing and outpainting at 1440 still follow the engine's size limits, see [performance](performance.md#large-sizes-what-limits-them-and-what-was-measured).
+The 1440 tier (about 3.7 MP, 14 400 tokens) runs text-to-image on a 16 GB card in about a minute; reference editing and outpainting at 1440 are accepted by default with a warning that the job is large (`MY_DIFFUSION_EDIT_LIMITS`), see [image modes](image-modes.md#limits-of-reference-editing) and [performance](performance.md#large-sizes-what-limits-them-and-what-was-measured).
 
 Portrait formats (9:16, 3:4, 2:3, 9:21) use the same numbers with the sides swapped.
 
