@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m my_diffusion.resolutions)",
+      "Bash(python -m pytest -q)"
+    ]
+  }
+}

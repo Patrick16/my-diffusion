@@ -27,6 +27,7 @@ RESOLUTION_TIERS: dict[str, int] = {
     "480": 480,
     "720": 720,
     "1080": 1080,
+    "1440": 1440,
 }
 
 # Format "width:height" -> width/height ratio.
