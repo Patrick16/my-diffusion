@@ -48,7 +48,7 @@ def main() -> None:
     parser.add_argument("--strength", type=float, default=None, help="with --init-image: how much to change the picture, 0 < strength <= 1 (default 0.6 for image-to-image, 1.0 for inpaint; 1.0 = start from pure noise)")
     parser.add_argument("--mask", type=Path, default=None, metavar="PATH", help="inpaint (needs --init-image): white = regenerate, black = keep; cropped like the picture")
     parser.add_argument("--feather", type=int, default=2, help="inpaint only: soft mask edge in latent pixels, 1 = 8 image pixels (default 2; 0 = hard edge)")
-    parser.add_argument("--reference", action="append", type=Path, default=[], metavar="PATH", help="reference editing, can be given up to 2 times: 1 = the scene, 2 = a subject or person; cannot be combined with --init-image or --mask")
+    parser.add_argument("--reference", action="append", type=Path, default=[], metavar="PATH", help="reference editing, can be given up to 2 times: 1 = the scene, 2 = a subject or person; with --init-image it is added after the init picture, which is image 1 (at most 1 then)")
     parser.add_argument("--reference-mode", choices=["scene", "subjects"], default="scene", help="'scene': --reference 1 is the main scene, the rest are people / objects; 'subjects': all references are people / objects")
     parser.add_argument("--outpaint", nargs=4, type=float, default=None, metavar=("TOP", "BOTTOM", "LEFT", "RIGHT"), help="extend reference 1 by these percentages of its sides and generate the new area (needs --reference, scene mode; replaces --aspect-ratio)")
     parser.add_argument("--keep-original", action="store_true", help="with --outpaint: keep reference 1's pixels unchanged and generate only the margins (default: the model may lightly redraw it)")
@@ -67,8 +67,13 @@ def main() -> None:
         parser.error("--aspect-ratio auto needs --reference-mode scene")
     if len(args.reference) > 2:
         parser.error(f"at most 2 --reference pictures are supported, got {len(args.reference)}")
-    if args.reference and (args.init_image or args.mask):
-        parser.error("--reference cannot be combined with --init-image or --mask")
+    if args.reference and args.init_image:
+        if len(args.reference) > 1:
+            parser.error("--init-image counts as image 1, so at most 1 --reference can be added to it")
+        if args.reference_mode != "scene":
+            parser.error("--reference with --init-image needs --reference-mode scene")
+        if args.outpaint and any(args.outpaint):
+            parser.error("--outpaint cannot be combined with --init-image")
     if args.aspect_ratio == "auto" and not args.reference:
         parser.error("--aspect-ratio auto needs --reference")
 

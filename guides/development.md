@@ -37,7 +37,6 @@ the libraries or on another machine. Scripts that need the GPU and the models ar
 
 ## Not implemented yet
 
-- references combined with `init_image` / `mask`
 - LoKr/LoHa LoRA files
 - other Qwen models for the prompt enhancer (Qwen3.5-4B-Abliterated, qwen3_8b): links to them in
   `models/text_encoders` are created, but the loader currently supports only Qwen3-VL-4B

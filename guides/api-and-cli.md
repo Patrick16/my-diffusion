@@ -56,6 +56,9 @@ Example request:
 }
 ```
 
+`references` may be sent together with `init_image` / `mask`: the init picture then counts as image 1
+(see [image modes](image-modes.md)), so at most `max_references - 1` references fit.
+
 Other request fields (`init_image`, `mask`, `references`, `reference_mode`, `outpaint`,
 `keep_original`, `remove_background`, `steps`, `guidance_scale`, `guidance_start`, `guidance_end`,
 `matmul`, `attention` ...) are described in [image modes](image-modes.md), [checkpoints](checkpoints.md)

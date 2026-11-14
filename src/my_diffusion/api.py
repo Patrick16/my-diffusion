@@ -467,8 +467,16 @@ def _check_generate(request: GenerateRequest) -> None:
     """Checks that need neither the pictures decoded nor the models loaded: answered with 400 at once."""
     if len(request.references) > settings.max_references:
         raise HTTPException(400, f"at most {settings.max_references} references are supported, got {len(request.references)}")
-    if request.references and (request.init_image is not None or request.mask is not None):
-        raise HTTPException(400, "references cannot be combined with init_image or mask")
+    if request.references and request.init_image is not None:
+        # The init picture becomes image 1 (Wan2GP's control image), the references follow it.
+        if len(request.references) + 1 > settings.max_references:
+            raise HTTPException(400, (
+                f"init_image counts as image 1, so at most {settings.max_references - 1} reference(s) can be added "
+                f"to it, got {len(request.references)}"))
+        if request.reference_mode != "scene":
+            raise HTTPException(400, "references with init_image need reference_mode 'scene'")
+        if request.outpaint is not None and any(request.outpaint.model_dump().values()):
+            raise HTTPException(400, "outpaint cannot be combined with init_image")
     if request.aspect_ratio == "auto" and not request.references:
         raise HTTPException(400, "aspect_ratio 'auto' needs references")
     if request.aspect_ratio == "auto" and request.reference_mode != "scene":
@@ -587,7 +595,8 @@ async def generate(request: GenerateRequest, caller: CallerDep) -> JobInfo:
 
     Modes: text-to-image; with init_image - image-to-image (the picture is noised to `strength` and denoised
     again); with init_image + mask - inpaint (only the white part of the mask is regenerated). With `references`
-    (1 or 2 pictures) - reference editing, not combinable with init_image or mask. Pictures are base64 PNG/JPEG.
+    (1 or 2 pictures) - reference editing; together with init_image (and mask) the init picture is also image 1
+    and the references follow it (so at most max_references - 1 of them). Pictures are base64 PNG/JPEG.
 
     The request is checked before it is queued: a malformed one gets 400 at once. Problems only the engine can
     see (an unknown LoRA, a size that does not fit the GPU) make the job "failed", with the reason in `error`.

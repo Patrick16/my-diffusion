@@ -106,6 +106,9 @@ Write under 120 words. Output only the description: no preamble, no explanations
 # keep_original: latent cells (8 px each) along the inner edges of reference 1's box where the generated
 # margin and the kept picture are mixed (imaging.outpaint_keep_weight). Chosen by looking at GPU results.
 KEEP_BLEND = 2
+# keep_original: pixels over which the original is feathered back in after the VAE decode (imaging.paste_original).
+# Smaller than the latent band (KEEP_BLEND * 8 px) so the ramp lies where the latent is already mostly the original.
+KEEP_PASTE_OVERLAP = 8
 
 
 def normalize_outpaint(outpaint, references: list, reference_mode: str) -> imaging.Margins | None:
@@ -525,10 +528,13 @@ class Krea2Engine:
         keep_original - only with outpaint: keep reference 1's pixels as they are. Its area is held to the
         original picture after every step, exactly like the kept part of an inpaint (latent blend), and only
         the margins are generated; a band of KEEP_BLEND latent cells at the inner edges of the box is mixed
-        (imaging.outpaint_keep_weight), so the seam stays hidden but those cells may change. Off by default.
+        (imaging.outpaint_keep_weight), so the seam stays hidden. After the VAE decode the original pixels are pasted back
+        (imaging.paste_original, 8 px feathered seam), so the kept area is exact. Off by default.
         remove_background - "subjects": cut the background (u2net, on the CPU) out of the people / objects before
         they are used: references 2.. in "scene" mode, all references in "subjects" mode; "none" - leave as is.
-        Not combinable with init_image or mask."""
+        With init_image (and mask) the references are added to it: the init picture becomes image 1 (it is also
+        what is inpainted / noised) and the references follow, within settings.max_references in total. Needs
+        reference_mode "scene"; not combinable with outpaint."""
         if not self.loaded:
             raise RuntimeError("the engine is not loaded yet")
         if output_name is not None and (Path(output_name).name != output_name or not output_name.endswith(".png")):
@@ -581,13 +587,26 @@ class Krea2Engine:
         if remove_background not in REMOVE_BACKGROUND_MODES:
             raise ValueError(f"remove_background must be one of {list(REMOVE_BACKGROUND_MODES)}, got {remove_background!r}")
         references = list(references or [])
+        user_references = len(references)   # what the caller sent; the control picture below is not counted in the result
+        if init_image is not None and references:
+            # Wan2GP's "control image + references": the init picture (inpaint / image-to-image source) is also
+            # reference 1 - the scene - so the prompt's "image 1" is the picture being edited and the references
+            # follow as "image 2".
+            if reference_mode != "scene":
+                raise ValueError("references with an init image need reference_mode 'scene': the init picture is image 1, the scene")
+            if outpaint is not None and any(outpaint):
+                raise ValueError("outpaint cannot be combined with an init image: outpaint grows reference 1 and there is no mask for it")
+            if len(references) + 1 > s.max_references:
+                raise ValueError(
+                    f"the init image counts as image 1, so at most {s.max_references - 1} reference picture(s) can be added "
+                    f"to it (max_references is {s.max_references}), got {len(references)}"
+                )
+            references = [init_image, *references]
         margins = normalize_outpaint(outpaint, references, reference_mode)
         if keep_original and margins is None:
             raise ValueError("keep_original keeps reference 1 inside an outpainted frame, so it needs outpaint (non-zero margins)")
         if len(references) > s.max_references:
             raise ValueError(f"at most {s.max_references} reference pictures are supported, got {len(references)}")
-        if references and (init_image is not None or mask is not None):
-            raise ValueError("references cannot be combined with an init image or a mask: editing builds the picture from the references")
         auto_size = aspect_ratio == "auto"
         if auto_size:
             if not references:
@@ -809,6 +828,10 @@ class Krea2Engine:
         t0 = time.time()
         self.gpu.use("vae")
         image = self.vae.decode(latent)
+        if keep_canvas is not None:
+            # The latent blend holds the original only up to the VAE round trip (1-2/255 off); paste its pixels back
+            # with a feathered seam so the kept area is exact (Wan2GP does the same after the decode).
+            image = imaging.paste_original(image, keep_canvas, src_box, KEEP_PASTE_OVERLAP)
         timings["decode"] = time.time() - t0
 
         path = s.output_dir / (output_name or f"{int(time.time())}_{seed}.png")
@@ -827,10 +850,10 @@ class Krea2Engine:
             "checkpoint": self.checkpoint_name,
             "matmul": self.matmul if self.native_layers else "exact",   # the mode the image was actually computed with
             "loras": [{"name": f.name, "weight": w} for f, w in lora_files],
-            "mode": "edit" if references else "text2image" if init_image is None else ("inpaint" if mask is not None else "image2image"),
+            "mode": "edit" if references and init_image is None else "text2image" if init_image is None else ("inpaint" if mask is not None else "image2image"),
             "strength": None if init_image is None else strength,
             "feather": None if mask is None else feather,
-            "references": len(references),
+            "references": user_references,
             "reference_mode": reference_mode if references else None,
             "outpaint": None if margins is None else dict(margins._asdict()),
             "remove_background": remove_background if cut_background else "none",
