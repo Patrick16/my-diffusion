@@ -45,6 +45,25 @@ def pinned_buffer(size: int) -> torch.Tensor | None:
         return None
 
 
+def release_unused() -> None:
+    """Gives the pinned RAM of dropped models back to the system. Call it after the models are gone.
+
+    PyTorch does not return a freed pinned chunk to the system: it keeps it to hand out again for the next
+    request of the same size. For models that is wrong twice. With pinning switched off at run time the old
+    17 GB stayed pinned next to the new ordinary copy (measured: the process held 35.7 GB instead of 18.5).
+    And a checkpoint in another format is laid out in chunks of other sizes, so the old chunks are never
+    asked for again (measured: +4 GB after the first switch). Pinned memory is the expensive kind - the system
+    cannot give it to anyone or page it out - so we return it at once and pin anew: that costs fractions of
+    a second per model.
+
+    Ordinary (not pinned) memory cannot be returned like this: PyTorch's allocator keeps freed blocks for the
+    process on Windows (it reuses them for the next ordinary load). So switching pinning back on at run time
+    leaves the process larger by the weight of the models until it restarts; the config API warns about it."""
+    empty = getattr(torch._C, "_host_emptyCache", None)   # no public name for it yet
+    if empty is not None and torch.cuda.is_available() and torch.cuda.is_initialized():
+        empty()
+
+
 def _pow2_floor(n: int) -> int:
     return 1 << (n.bit_length() - 1)
 

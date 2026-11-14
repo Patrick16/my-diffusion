@@ -112,8 +112,20 @@ def read_safetensors(
     path = Path(path)
     tensors: dict[str, torch.Tensor] = {}
     with open(path, "rb") as f:
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len))
+        # A damaged or half-downloaded file: say so, instead of trying to read a header of a nonsense length.
+        damaged = f"{path.name} is not a .safetensors file, or it is damaged or cut short"
+        file_size = f.seek(0, 2)
+        f.seek(0)
+        prefix = f.read(8)
+        header_len = struct.unpack("<Q", prefix)[0] if len(prefix) == 8 else 0
+        if not 0 < header_len <= file_size - 8:
+            raise ValueError(damaged)
+        try:
+            header = json.loads(f.read(header_len))
+        except ValueError as exc:   # not JSON, or not text at all
+            raise ValueError(damaged) from exc
+        if not isinstance(header, dict):
+            raise ValueError(damaged)
         base = 8 + header_len
         metadata = header.pop("__metadata__", None) or {}
         entries = sorted(header.items(), key=lambda kv: kv[1]["data_offsets"][0])

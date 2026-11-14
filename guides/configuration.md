@@ -106,6 +106,13 @@ Every setting has one of three classes (`apply` in `GET /config`, the **Change**
 | `reload_models` | The models are read again on every GPU: only the checkpoint for `checkpoint` and `checkpoints_dir`, all three models for `vae`, `text_encoder`, `pin_memory` and `models_dir`. Allowed only while no job waits or runs; otherwise `409` and nothing changes |
 | `restart` | Only saved. The server keeps running with the old value until it is restarted; `GET /config` shows `pending_restart: true` and the saved value in `saved` |
 
+RAM after a reload. The pinned memory of the models that were dropped goes back to the system at once, so
+switching the checkpoint, or switching `pin_memory` off, leaves the server no larger than a fresh start
+(measured: 18.9 GB with pinning, 18.4 GB after it was switched off). The other direction is different:
+ordinary memory that PyTorch has freed stays with the process on Windows, so switching `pin_memory` back
+**on** at run time leaves the server larger by the weight of the models (35 GB instead of 19) until it is
+restarted. `PATCH /config` says so in `warnings`.
+
 Settings marked `-` cannot be changed through the API at all: the API keys and the list of admin clients
 (secrets and access rights stay in the environment; the keys are never shown either, only the client names),
 the folders where existing pictures and jobs are found (`output_dir`, `inputs_dir`, `database_path`), and the

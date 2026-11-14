@@ -166,7 +166,7 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(*(_on_slot(slot, engines[slot.name].load) for slot in slots))
         except Exception as exc:  # noqa: BLE001 - we show the reason in /health instead of silently crashing the server
             logger.exception("could not load the models")
-            _load_error = f"{type(exc).__name__}: {exc}"
+            _load_error = _error_text(exc)
         else:
             scheduler.resume()
 
@@ -762,6 +762,12 @@ def _describe_config() -> dict:
     return runtime_config.describe(settings, _overrides, _config_problems, runtime_config.read_baseline())
 
 
+def _error_text(exc: BaseException) -> str:
+    """"ValueError: the reason", or the type alone when the exception carries no text (a MemoryError)."""
+    text = str(exc).strip().rstrip(".")
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 def _sync_load_state(error: BaseException | None = None) -> None:
     """After the engines were touched: bring /health's error and the scheduler in line with whether the models
     are there. Models that failed to load at start and load now clear the error and start the queue; models
@@ -773,7 +779,7 @@ def _sync_load_state(error: BaseException | None = None) -> None:
             if scheduler is not None:
                 scheduler.resume()
     elif error is not None or _load_error is None:
-        _load_error = f"{type(error).__name__}: {error}" if error is not None else "the models are not loaded"
+        _load_error = _error_text(error) if error is not None else "the models are not loaded"
         if scheduler is not None:
             scheduler.pause()
 
@@ -830,11 +836,11 @@ async def _change_config(change: ConfigChange, caller: Caller):
                 switched = {slot.name for slot, result in zip(slots, results) if not isinstance(result, BaseException)}
                 await _switch_engines({name: before[name] for name in switched})
                 _sync_load_state(failures[0])
-                logger.warning("config change by %s could not be applied: %s", caller.owner, failures[0])
+                logger.warning("config change by %s could not be applied: %s", caller.owner, _error_text(failures[0]))
                 lost = "" if _models_loaded() else " The models are not loaded now: see /health."
                 raise HTTPException(
                     400, f"the settings could not be applied and were left as they were: "
-                    f"{type(failures[0]).__name__}: {failures[0]}.{lost}",
+                    f"{_error_text(failures[0])}.{lost}",
                 )
             reload = runtime_config.heaviest_reload(results)
         try:

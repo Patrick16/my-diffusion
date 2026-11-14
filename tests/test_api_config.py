@@ -286,6 +286,14 @@ def test_vae_reloads_all_the_models(client, stage):
     assert [call[0] for call in stage.calls] == ["unload", "load", "load_checkpoint"]
 
 
+def test_switching_pinning_back_on_warns_that_the_ram_stays_until_a_restart(client, stage):
+    off = patch(client, set={"pin_memory": False}).json()
+    assert off["reloaded"] == "all" and off["warnings"] == []   # the pinned RAM does go back, see pinned.release_unused
+    on = patch(client, reset=["pin_memory"]).json()
+    assert on["reloaded"] == "all" and len(on["warnings"]) == 1
+    assert "pin_memory" in on["warnings"][0] and "restart" in on["warnings"][0]
+
+
 def test_models_that_failed_to_load_can_be_repaired_through_the_api(client, stage, monkeypatch):
     stage.loaded = False
     monkeypatch.setattr(api, "_load_error", "FileNotFoundError: no file 'a.safetensors'")

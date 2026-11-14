@@ -228,6 +228,13 @@ def _check(current: Settings, running: Settings, wanted: Settings, to_set: set[s
             errors["rembg_model"] = f"no file {running.rembg_model_path}"
         else:
             warnings.append(f"no background-removal model at {running.rembg_model_path}: remove_background will fail until it is there")
+
+    def pinned(s: Settings) -> bool:
+        return s.pin_memory and s.device != "cpu"
+
+    if pinned(running) and not pinned(current):
+        warnings.append("pin_memory: the RAM that held the unpinned weights (about as much as the models weigh) "
+                        "stays with the server process until it restarts; restart the server to give it back")
     switched_to_sage2 = running.attention == "sage2" and current.attention != "sage2"
     if switched_to_sage2 and importlib.util.find_spec("sageattention") is None:
         errors["attention"] = "the sage2 kernel needs the optional sageattention package: install it with `uv sync --group sage2`"

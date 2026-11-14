@@ -32,6 +32,7 @@ from .config import Settings, inside_folder
 from .imaging import cover_crop
 from .lora import LoraFile, apply_loras, load_lora, truncate_rank
 from .memory import GpuSlot, Resident
+from .pinned import release_unused
 from .resolutions import ASPECT_RATIOS, max_pixels, resolve_dimensions, resolve_dimensions_from_size
 from .text_encoder import QwenVL
 from .transformer import Krea2Transformer, set_attention_kernel
@@ -178,7 +179,8 @@ class Krea2Engine:
         self._image_cache.clear()
         self._lora_cache.clear()
         self._applied_loras = []
-        gc.collect()   # the old weights (pinned RAM) must be gone before the new ones are read
+        gc.collect()   # the old weights must be gone before the new ones are read ...
+        release_unused()   # ... and their pinned RAM back with the system, see pinned.py
 
     # ------------------------------------------------------------------ settings changed at run time
     def reload_plan(self, new: Settings) -> str:
@@ -263,9 +265,13 @@ class Krea2Engine:
         if self.gpu.active == "model":
             self.gpu.release()
         # free RAM from the previous checkpoint before reading the new one
+        had_model = self.model is not None
         self.model = None
         self.gpu.residents.pop("model", None)
         self._lora_cache.clear()
+        if had_model:
+            gc.collect()
+            release_unused()   # the new file may be laid out in other chunks: see pinned.py
         pin = self.settings.pin_memory and self.settings.device != "cpu"
         model = Krea2Transformer()
         load_into(model, read_checkpoint(path, pin=pin))
