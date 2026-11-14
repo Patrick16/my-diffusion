@@ -491,6 +491,8 @@ def _check_generate(request: GenerateRequest) -> None:
         raise HTTPException(400, "keep_original needs outpaint (non-zero margins)")
     if request.mask is not None and request.init_image is None:
         raise HTTPException(400, "mask needs init_image")
+    if request.inpaint_iterations and request.mask is None:
+        raise HTTPException(400, "inpaint_iterations needs mask")
     if request.strength is not None and request.init_image is None:
         raise HTTPException(400, "strength needs init_image")
 
@@ -522,6 +524,7 @@ def _run_job(slot: Slot, job: JobRecord, cancel_event, progress) -> dict:
         strength=request.strength,
         mask=picture(names["mask"]) if "mask" in names else None,
         feather=request.feather,
+        inpaint_iterations=request.inpaint_iterations,
         references=[picture(name) for name in names.get("references", [])],
         reference_mode=request.reference_mode,
         outpaint=None if outpaint is None else (outpaint.top, outpaint.bottom, outpaint.left, outpaint.right),

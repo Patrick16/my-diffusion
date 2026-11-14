@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .langevin import MAX_ITERATIONS
 from .resolutions import ASPECT_RATIOS, RESOLUTION_TIERS
 
 
@@ -59,6 +60,7 @@ class GenerateRequest(BaseModel):
     strength: float | None = Field(default=None, gt=0.0, le=1.0, description="None - the mode default: 0.6 image-to-image, 1.0 inpaint. Needs init_image")
     mask: str | None = Field(default=None, description="Base64 of a PNG: white = regenerate, black = keep. Needs init_image")
     feather: int = Field(default=2, ge=0, le=32, description="Softness of the mask edge, in latent pixels (1 latent pixel = 8 image pixels)")
+    inpaint_iterations: int = Field(default=0, ge=0, le=MAX_ITERATIONS, description="Only with mask: extra network calls before every step that make the regenerated area agree with the kept one. 0 = off. Use 2 to complete a part of an object (sampling takes about 2.5 times longer); leave 0 to fill a large area with background")
 
     # Reference editing. With init_image the init picture is image 1 and these follow it.
     references: list[str] = Field(default_factory=list, description="Base64 PNG/JPEG reference pictures. Up to config max_references")
@@ -87,6 +89,7 @@ class GenerationResult(BaseModel):
     mode: str = Field(default="text2image", description="text2image, image2image, inpaint or edit")
     strength: float | None = None
     feather: int | None = None
+    inpaint_iterations: int = Field(default=0, description="Refinement iterations per step that the inpaint ran with; 0 = the plain blend")
     references: int = 0
     reference_mode: str | None = None
     outpaint: OutpaintMargins | None = Field(default=None, description="The margins actually applied; None when outpainting was off")

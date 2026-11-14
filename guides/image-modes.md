@@ -7,7 +7,7 @@ contains `mode` (`text2image`, `image2image`, `inpaint`, `edit`).
 | Mode | Request fields | CLI flags |
 |---|---|---|
 | Image-to-image | `init_image`, `strength` (default 0.6) | `--init-image`, `--strength` |
-| Inpaint | `init_image`, `mask`, `feather` (default 2), `strength` (default 1.0) | `--init-image`, `--mask`, `--feather`, `--strength` |
+| Inpaint | `init_image`, `mask`, `feather` (default 2), `strength` (default 1.0), `inpaint_iterations` (default 0) | `--init-image`, `--mask`, `--feather`, `--strength`, `--inpaint-iterations` |
 | Reference editing | `references` (1 or 2 pictures) | `--reference` (repeat it), `--aspect-ratio auto` |
 
 Pictures in the API are base64 PNG or JPEG (a `data:image/...;base64,` prefix is accepted).
@@ -37,6 +37,37 @@ uv run my-diffusion-generate "a red umbrella" --init-image street.png --mask mas
 
 ```json
 {"prompt": "a red umbrella", "init_image": "<base64>", "mask": "<base64>", "feather": 2, "strength": 1.0}
+```
+
+### Completing part of an object: `inpaint_iterations`
+
+The plain inpaint gives the masked area one network call per noise level, and that is often too
+little for it to agree with what is kept. On a subject cut in half the network may draw a second
+head; on a band through a body, an extra leg. `inpaint_iterations` (CLI: `--inpaint-iterations`)
+adds that many network calls before every step but the last: the picture is moved around at the same
+noise level (Langevin dynamics, the LanPaint method), so the two areas settle on one picture before
+the step is taken. The kept area is still exactly the original at the end.
+
+| Value | Use | Sampling time (turbo, 8 steps) |
+|---|---|---|
+| 0 (default) | the plain blend; filling a hole with background, removing an object | 1x |
+| 2 | completing a part of an object from the part that is kept | about 2.5x |
+| 3-5 | allowed, but measured no better than 2 | up to 5x |
+
+It does not remove the failure, only makes it rarer, and it varies by seed: on a fox cut in half, 2
+iterations gave a clean picture in about 6 seeds of 9 against none of 3 without them. Try another
+`seed` if a second head still appears.
+
+For removing an object (a large hole to fill with background) keep it at 0: with 5 and more the
+model tends to draw a separate scene inside the mask, with its own horizon. To repeat the
+comparison on your pictures: `scripts/check_inpaint_iterations.py`.
+
+```bash
+uv run my-diffusion-generate "a red fox walking through the snow, side view" --init-image fox.png --mask right_half.png --inpaint-iterations 2
+```
+
+```json
+{"prompt": "a red fox walking through the snow, side view", "init_image": "<base64>", "mask": "<base64>", "inpaint_iterations": 2}
 ```
 
 ## Reference editing
