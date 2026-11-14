@@ -322,7 +322,7 @@
                 <a class="btn" x-show="current.status === 'done'" :href="'#/job/' + current.job_id">Details</a>
               </div>
               <div class="preview" :style="'aspect-ratio:' + aspect(current)">
-                <img x-show="current.status === 'done'" :src="current.status === 'done' ? '/api/result/' + current.job_id + '/image' : ''" alt="Result">
+                <img class="zoomable" x-show="current.status === 'done'" :src="current.status === 'done' ? '/api/result/' + current.job_id + '/image' : ''" alt="Result" title="Click for full screen" @click="lbOpen(current.job_id)">
                 <div class="overlay" x-show="current.status === 'running' || current.status === 'queued'">
                   <div class="row"><span style="font-weight:600" x-text="current.status === 'running' ? 'Denoising' : 'Waiting in the queue'"></span><div class="grow"></div>
                     <span class="mono" x-text="current.status === 'running' ? 'step ' + (current.step || 0) + ' / ' + (current.total_steps || '?') + ' · ' + pct(current) + '%' : 'position ' + current.position"></span></div>
@@ -355,13 +355,31 @@
             <p class="lbl">Waiting in the queue</p>
             <div style="display:flex;flex-direction:column;gap:8px">
               <template x-for="j in waitingJobs" :key="j.job_id">
-                <div class="qitem">
-                  <span class="mono" style="color:var(--accent)" x-text="'#' + j.position"></span>
-                  <span style="flex:1 1 160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" x-text="j.params.prompt"></span>
-                  <span class="chip mono" x-text="j.owner"></span>
-                  <span class="sub" x-text="modeOf(j) + ' · ' + j.params.resolution"></span>
-                  <button class="btn sm" @click="reuse(j, false)" title="Copy settings and pictures to the form">Copy to form</button>
-                  <button class="btn sm" @click="cancel(j.job_id)">Cancel</button>
+                <div class="qcard" :class="qOpen[j.job_id] && 'open'">
+                  <div class="qhead" role="button" tabindex="0" :aria-expanded="!!qOpen[j.job_id]" @click="qToggle(j.job_id)" @keydown.enter.prevent="qToggle(j.job_id)" @keydown.space.prevent="qToggle(j.job_id)">
+                    <span class="mono" style="color:var(--accent)" x-text="'#' + j.position"></span>
+                    <span class="qprompt" x-text="j.params.prompt"></span>
+                    <span class="chip mono" x-text="j.owner"></span>
+                    <span class="sub" x-text="modeOf(j) + ' · ' + j.params.resolution"></span>
+                    <button class="btn sm" @click.stop="cancel(j.job_id)">Cancel</button>
+                    <span class="sub qarrow" x-text="qOpen[j.job_id] ? '▾' : '▸'"></span>
+                  </div>
+                  <div class="qbody" x-show="qOpen[j.job_id]">
+                    <div style="line-height:1.5;white-space:pre-wrap" x-text="j.params.prompt"></div>
+                    <dl class="qfacts">
+                      <template x-for="[k, v] in queueFacts(j)" :key="k"><div><dt class="sub" x-text="k"></dt><dd class="mono" x-text="v"></dd></div></template>
+                    </dl>
+                    <div x-show="Object.keys(j.inputs || {}).length">
+                      <div class="sub" style="margin-bottom:6px">Input pictures</div>
+                      <div class="row wrap" style="gap:10px;align-items:flex-start">
+                        <template x-for="[name, url] in kv(j.inputs)" :key="j.job_id + name">
+                          <figure style="margin:0;position:relative;width:120px"><img class="thumb" loading="lazy" :src="'/api' + url" :alt="name" @error="$el.closest('figure').remove()"><span class="chip" style="position:absolute;left:4px;top:4px;padding:2px 6px;font-size:11px;background:var(--bg)" x-text="name"></span></figure>
+                        </template>
+                        <span class="sub" style="flex:1 1 200px">Loaded from the server for every client's job. It keeps them 7 days after the job, then they are gone.</span>
+                      </div>
+                    </div>
+                    <div class="row wrap"><button class="btn sm" @click="reuse(j, false)">Copy settings and pictures to the form</button></div>
+                  </div>
                 </div>
               </template>
             </div>
@@ -392,17 +410,29 @@
           <template x-for="s in statusFilters" :key="s"><button class="fchip" :class="filters.status === s && 'on'" @click="filters.status = s" x-text="s"></button></template>
           <span style="width:1px;height:22px;background:var(--line)"></span>
           <template x-for="m in modeFilters" :key="m"><button class="fchip" :class="filters.mode === m && 'on'" @click="filters.mode = m" x-text="m"></button></template>
+          <div class="grow"></div>
+          <button class="btn sm" :class="selecting && 'pri'" @click="toggleSelecting()" x-text="selecting ? 'Done' : 'Select'"></button>
+        </div>
+        <div class="chg-bar" x-show="selecting">
+          <button class="btn sm" @click="selectAll()" x-text="allSelected ? 'Clear selection' : 'Select all (' + selectable.length + ')'"></button>
+          <span><b x-text="selIds.length"></b> <span class="sub">selected · Shift-click selects a range</span></span>
+          <div class="grow"></div>
+          <button class="btn sm dng" :disabled="!selIds.length" @click="askDelete(selIds)" x-text="'Delete selected' + (selIds.length ? ' (' + selIds.length + ')' : '')"></button>
         </div>
         <div class="sub" x-show="jobsLoaded && !jobList.length">No jobs yet.</div>
         <div class="masonry">
           <template x-for="j in filtered" :key="j.job_id">
-            <a class="tile" :href="'#/job/' + j.job_id">
+            <a class="tile" :class="[selecting && 'selecting', sel[j.job_id] && 'picked', selecting && !isFinished(j) && 'locked']" :href="'#/job/' + j.job_id"
+               @click="if (selecting) { $event.preventDefault(); if (isFinished(j)) toggleSel(j.job_id, $event); }">
               <template x-if="j.status === 'done'"><img loading="lazy" :src="'/api/result/' + j.job_id + '/image'" :style="'aspect-ratio:' + aspect(j)" alt=""></template>
               <template x-if="j.status !== 'done'">
                 <div class="art" :style="'aspect-ratio:' + aspect(j)">
                   <span x-text="j.status === 'running' ? 'Generating, ' + pct(j) + '%' : j.status === 'queued' ? 'Waiting in the queue' : j.status === 'failed' ? 'Failed: ' + j.error : 'Cancelled'"></span>
                 </div>
               </template>
+              <span class="badge check" x-show="selecting && isFinished(j)" x-text="sel[j.job_id] ? '☑' : '☐'"></span>
+              <button class="badge del" x-show="!selecting && isFinished(j)" @click.prevent.stop="askDelete([j.job_id])" title="Delete" aria-label="Delete">🗑</button>
+              <button class="badge expand" x-show="j.status === 'done' && !selecting" @click.prevent.stop="lbOpen(j.job_id)" title="Full screen" aria-label="Full screen">⤢</button>
               <span class="badge" style="left:8px;top:8px" x-text="modeOf(j)"></span>
               <span class="badge mono" style="right:8px;top:8px" :style="{ color: statusColor(j.status) }" x-text="j.status"></span>
               <div style="padding:10px 12px">
@@ -428,13 +458,14 @@
                 <button class="btn" @click="step(-1)" aria-label="Next picture">Next</button>
               </div>
               <div class="stagebox" :class="zoom && 'scroll'">
-                <template x-if="detail.status === 'done'"><img :class="zoom && 'full'" :src="'/api/result/' + detail.job_id + '/image'" alt="Result"></template>
+                <template x-if="detail.status === 'done'"><img class="zoomable" :class="zoom && 'full'" :src="'/api/result/' + detail.job_id + '/image'" alt="Result" title="Click for full screen" @click="lbOpen(detail.job_id)"></template>
                 <div x-show="detail.status !== 'done'" style="text-align:center">
                   <div x-text="detail.status === 'failed' ? 'Failed' : detail.status === 'cancelled' ? 'Cancelled' : detail.status === 'running' ? 'Generating, ' + pct(detail) + '%' : 'Waiting in the queue'"></div>
                   <div class="err" style="margin-top:8px" x-show="detail.error" x-text="detail.error"></div>
                 </div>
               </div>
               <div class="row wrap">
+                <button class="btn" @click="lbOpen(detail.job_id)" x-show="detail.status === 'done'">Full screen</button>
                 <button class="btn" @click="zoom = !zoom" x-show="detail.status === 'done'" x-text="zoom ? 'Fit to screen' : 'Zoom 100%'"></button>
                 <span class="chip mono" x-show="detail.result" x-text="detail.result && detail.result.width + ' × ' + detail.result.height"></span>
                 <div class="grow"></div>
@@ -459,6 +490,7 @@
                 <button class="btn" x-show="detail.status === 'done'" @click="useAsReference(detail)">Use as reference</button>
                 <a class="btn" x-show="detail.status === 'done'" :href="'/api/result/' + detail.job_id + '/image'" :download="detail.job_id + '.png'">Download PNG</a>
                 <button class="btn dng" x-show="detail.status === 'queued' || detail.status === 'running'" @click="cancel(detail.job_id)">Cancel job</button>
+                <button class="btn dng" x-show="isFinished(detail)" @click="askDelete([detail.job_id])">Delete</button>
               </div>
               <div>
                 <p class="lbl">Generation</p>
@@ -687,6 +719,33 @@
           </section>
         </div>
       </main>
+    </div>
+  </div>
+  <div id="lightbox" class="lightbox" x-show="lb.open" @click.self="lbClose()" @pointerdown="lbDown($event)" @pointerup="lbUp($event)">
+    <template x-if="lb.open && lbJob">
+      <div class="lbstage" :class="lb.zoom && 'zoomed'" @click.self="lbClose()">
+        <img :src="'/api/result/' + lbJob.job_id + '/image'" :alt="lbJob.params.prompt" draggable="false" @click="lb.zoom = !lb.zoom" :title="lb.zoom ? 'Click to fit the screen' : 'Click for 100%'">
+      </div>
+    </template>
+    <div class="lbbar top">
+      <span class="chip" x-text="(lbIndex + 1) + ' / ' + lbList.length"></span>
+      <span class="chip mono" x-show="lbJob && lbJob.result" x-text="lbJob && lbJob.result ? lbJob.result.width + ' × ' + lbJob.result.height + ' · seed ' + lbJob.result.seed : ''"></span>
+      <div class="grow"></div>
+      <a class="btn sm" x-show="lbJob" :href="lbJob ? '#/job/' + lbJob.job_id : '#'" @click="lbClose()">Details</a>
+      <button class="btn sm" @click="lb.zoom = !lb.zoom" x-text="lb.zoom ? 'Fit' : '100%'"></button>
+      <button class="btn sm" @click="lbFullscreen()" x-text="lb.native ? 'Exit full screen' : 'Full screen'"></button>
+      <button class="btn sm" @click="lbClose()" aria-label="Close">×</button>
+    </div>
+    <button class="lbnav left" @click="lbStep(1)" :disabled="lbIndex >= lbList.length - 1" aria-label="Previous picture">‹</button>
+    <button class="lbnav right" @click="lbStep(-1)" :disabled="lbIndex <= 0" aria-label="Next picture">›</button>
+    <div class="lbbar bottom" x-show="lbJob"><span class="lbcap" x-text="lbJob && lbJob.params.prompt"></span><span class="sub">← → turn the page · Space 100% · F full screen · Esc close</span></div>
+    <div style="display:none"><template x-for="n in (lb.open ? lbNeighbours() : [])" :key="n.job_id"><img :src="'/api/result/' + n.job_id + '/image'" alt=""></template></div>
+  </div>
+  <div class="modal" x-show="delAsk" @keydown.escape.window="delAsk = null" @click.self="delAsk = null">
+    <div class="sheet" style="width:min(440px,100%)">
+      <h2 style="margin:0;font-size:16px" x-text="delAsk && delAsk.ids.length === 1 ? 'Delete this job?' : 'Delete ' + (delAsk ? delAsk.ids.length : 0) + ' jobs?'"></h2>
+      <p class="sub" style="margin:0;line-height:1.5">The jobs are removed from the server with their pictures: the result and the pictures that were sent. This cannot be undone.</p>
+      <div class="row" style="justify-content:flex-end"><button class="btn" @click="delAsk = null" :disabled="deleting">Cancel</button><button class="btn dng" @click="confirmDelete()" :disabled="deleting" x-text="deleting ? 'Deleting…' : 'Delete'"></button></div>
     </div>
   </div>
   <div class="modal" x-show="galleryPick" @keydown.escape.window="galleryPick = null" @click.self="galleryPick = null">

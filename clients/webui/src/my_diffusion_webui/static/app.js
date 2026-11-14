@@ -68,6 +68,7 @@ function app() {
     jobsLoaded: false, exhausted: false, limit: PAGE, watchers: {},
     now: Date.now() / 1000,
     toast: '', zoom: false,
+    lb: { open: false, id: null, zoom: false, native: false },   // the full-screen viewer
 
     // ---------------------------------------------------------------- create
     modes: MODES, mode: 'Text2img',
@@ -90,6 +91,8 @@ function app() {
       this.$watch('form', () => this.saveForm());
       window.addEventListener('hashchange', () => this.readRoute());
       window.addEventListener('paste', ev => this.onPaste(ev));
+      window.addEventListener('keydown', ev => this.lbKey(ev));
+      document.addEventListener('fullscreenchange', () => { this.lb.native = !!document.fullscreenElement; });
       this.readRoute();
       setInterval(() => { this.now = Date.now() / 1000; }, 1000);
       await this.loadConnection();
@@ -385,6 +388,11 @@ function app() {
         const list = await this.api('jobs?limit=' + this.limit);
         const next = { ...this.jobs };
         for (const j of list) next[j.job_id] = (this.watchers[j.job_id] && next[j.job_id] && !['done', 'failed', 'cancelled'].includes(j.status)) ? { ...j, ...this.freshest(next[j.job_id], j) } : j;
+        // A finished job inside the listed time span that the list no longer has was deleted (here or elsewhere).
+        const inList = new Set(list.map(j => j.job_id)), oldest = list.length ? Math.min(...list.map(j => j.created_at)) : -Infinity;
+        for (const [id, j] of Object.entries(next)) {
+          if (!inList.has(id) && this.isFinished(j) && (list.length < this.limit || j.created_at >= oldest)) delete next[id];
+        }
         this.jobs = next; this.jobsLoaded = true; this.exhausted = list.length < this.limit;
         for (const j of list) if (['queued', 'running'].includes(j.status)) this.watch(j.job_id);
       } catch (e) { /* the health pill reports the problem */ }
@@ -423,8 +431,68 @@ function app() {
     get activeJobs() { return this.jobList.filter(j => j.status === 'queued' || j.status === 'running'); },
     get runningJobs() { return this.activeJobs.filter(j => j.status === 'running'); },
     get waitingJobs() { return this.activeJobs.filter(j => j.status === 'queued').sort((a, b) => a.position - b.position); },
+    // The job on show: the one that is running now (the progress bar), whoever queued it; with several GPUs the one
+    // submitted here wins. Only when nothing runs: the last job submitted here, then the first waiting, then the newest.
     get current() {
-      return (this.currentId && this.jobs[this.currentId]) || this.runningJobs[0] || this.waitingJobs[0] || this.jobList[0] || null;
+      const mine = this.currentId && this.jobs[this.currentId];
+      const running = this.runningJobs;
+      if (running.length) return (mine && mine.status === 'running' && mine) || running[0];
+      return mine || this.waitingJobs[0] || this.jobList[0] || null;
+    },
+    // ---------------------------------------------------------------- deleting jobs (POST /jobs/delete, up to 500 ids a call)
+    selecting: false, sel: {}, lastSel: null, delAsk: null, deleting: false,
+    isFinished(j) { return ['done', 'failed', 'cancelled'].includes(j.status); },
+    get selIds() { return Object.keys(this.sel).filter(id => this.sel[id] && this.jobs[id]); },
+    get selectable() { return this.filtered.filter(j => this.isFinished(j)); },
+    get allSelected() { return this.selectable.length > 0 && this.selectable.every(j => this.sel[j.job_id]); },
+    toggleSelecting() { this.selecting = !this.selecting; this.sel = {}; this.lastSel = null; },
+    // A click selects; with Shift it selects the whole stretch from the last click.
+    toggleSel(id, ev) {
+      const ids = this.selectable.map(j => j.job_id), next = { ...this.sel };
+      if (ev && ev.shiftKey && this.lastSel && ids.includes(this.lastSel) && ids.includes(id)) {
+        const [a, b] = [ids.indexOf(this.lastSel), ids.indexOf(id)].sort((x, y) => x - y);
+        for (const k of ids.slice(a, b + 1)) next[k] = true;
+      } else next[id] = !next[id];
+      this.lastSel = id; this.sel = next;
+    },
+    selectAll() { this.sel = this.allSelected ? {} : Object.fromEntries(this.selectable.map(j => [j.job_id, true])); },
+    askDelete(ids) { if (ids.length) this.delAsk = { ids }; },
+    async confirmDelete() {
+      const ids = this.delAsk.ids; this.deleting = true;
+      try {
+        const gone = [], active = [];
+        for (let i = 0; i < ids.length; i += 500) {   // the server takes up to 500 at once
+          const r = await this.api('jobs/delete', { method: 'POST', body: { ids: ids.slice(i, i + 500) } });
+          gone.push(...r.deleted, ...r.not_found); active.push(...r.active);   // not found: already gone (or not ours)
+        }
+        const next = { ...this.jobs }; for (const id of gone) delete next[id];
+        this.jobs = next; this.sel = {}; this.lastSel = null;
+        if (this.currentId && !this.jobs[this.currentId]) this.currentId = null;
+        this.flash(`Deleted ${gone.length} ${gone.length === 1 ? 'job' : 'jobs'}` + (active.length ? `; ${active.length} still waiting or running: cancel first` : ''));
+        if (this.route.page === 'job' && this.route.id && !this.jobs[this.route.id]) location.hash = '#/gallery';
+        if (this.selecting && !this.selectable.length) this.selecting = false;
+      } catch (e) { this.flash('Delete failed: ' + e.message); }
+      this.deleting = false; this.delAsk = null;
+    },
+
+    // The card of a waiting job opens to show what was asked for (the design's expandable queue row).
+    qOpen: {},
+    qToggle(id) { this.qOpen = { ...this.qOpen, [id]: !this.qOpen[id] }; },
+    queueFacts(j) {
+      const p = j.params, kind = this.modeOf(j), f = [];
+      f.push(['Author', j.owner], ['Queued', this.ago(j.created_at)], ['Mode', kind + (p.reference_mode && (kind === 'edit' || kind === 'outpaint') ? ' · ' + p.reference_mode : '')]);
+      f.push(['Size', kind === 'outpaint' ? p.resolution : `${p.resolution} · ${p.aspect_ratio || '16:9'}`]);
+      f.push(['Seed', p.seed ?? 'random']);
+      f.push(['Steps / CFG', `${p.steps ?? 'auto'} / ${p.guidance_scale ?? 'auto'}`]);
+      if (p.strength != null) f.push(['Strength', p.strength]);
+      if (p.mask || (j.inputs || {}).mask) f.push(['Feather / refinement', `${p.feather ?? 2} / ${p.inpaint_iterations || 0}`]);
+      const loras = (p.loras || []).map(l => `${l.name} ${l.weight}`);
+      if (loras.length) f.push(['LoRA', loras.join(', ')]);
+      if (p.remove_background === 'subjects') f.push(['Background cut', 'subjects']);
+      const o = p.outpaint;
+      if (o && Object.values(o).some(v => v)) f.push(['Outpaint', `${o.top} / ${o.bottom} / ${o.left} / ${o.right}%` + (p.keep_original ? ', keep original' : '')]);
+      f.push(['Enhance', p.enhance_prompt ? 'on' : 'off']);
+      return f;
     },
     get recent() { return this.jobList.filter(j => j.status === 'done').slice(0, 8); },
 
@@ -468,6 +536,43 @@ function app() {
       const i = done.findIndex(j => j.job_id === this.route.id), n = done[i + delta];
       if (n) this.go(n.job_id);
     },
+    // ---------------------------------------------------------------- full-screen viewer: browse the finished pictures
+    get lbList() { return this.filtered.filter(j => j.status === 'done'); },   // the gallery's order and filters
+    get lbIndex() { return this.lbList.findIndex(j => j.job_id === this.lb.id); },
+    get lbJob() { return this.lb.id ? this.jobs[this.lb.id] || null : null; },
+    lbOpen(id) { this.lb = { ...this.lb, open: true, id, zoom: false }; },
+    lbClose() {
+      if (document.fullscreenElement) document.exitFullscreen();
+      if (this.route.page === 'job' && this.lb.id && this.lb.id !== this.route.id) this.go(this.lb.id);   // the detail page follows
+      this.lb = { ...this.lb, open: false, zoom: false };
+    },
+    lbStep(delta) {
+      const n = this.lbList[this.lbIndex + delta];
+      if (n) this.lb = { ...this.lb, id: n.job_id, zoom: false };
+    },
+    // Left / right: older / newer ... the same order as Prev / Next on the detail page.
+    lbKey(ev) {
+      if (!this.lb.open || (ev.target.matches && ev.target.matches('input, textarea'))) return;
+      const keys = { ArrowLeft: () => this.lbStep(1), ArrowRight: () => this.lbStep(-1), Escape: () => this.lbClose(), f: () => this.lbFullscreen(), ' ': () => { this.lb.zoom = !this.lb.zoom; } };
+      if (keys[ev.key]) { ev.preventDefault(); keys[ev.key](); }
+    },
+    lbFullscreen() {
+      const el = document.getElementById('lightbox');
+      if (document.fullscreenElement) document.exitFullscreen(); else if (el && el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    },
+    // A swipe on a touch screen turns the page.
+    lbSwipe: null,
+    lbDown(ev) { this.lbSwipe = ev.clientX; },
+    lbUp(ev) {
+      if (this.lbSwipe === null || this.lb.zoom) return;
+      const dx = ev.clientX - this.lbSwipe; this.lbSwipe = null;
+      if (Math.abs(dx) > 60) this.lbStep(dx > 0 ? 1 : -1);
+    },
+    // The neighbours are loaded ahead, so turning the page shows the picture at once.
+    lbNeighbours() {
+      return [this.lbList[this.lbIndex - 1], this.lbList[this.lbIndex + 1]].filter(Boolean);
+    },
+
     // Puts a job's settings and (while the server still has them) its input pictures back into the form.
     async reuse(j, newSeed) {
       const p = j.params, kind = this.modeOf(j), f = DEFAULT_FORM();

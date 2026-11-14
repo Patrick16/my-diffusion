@@ -50,7 +50,8 @@ server's settings). Do it only on a network you trust, and set API keys on the A
   - *Outpaint*: margins in %, live frame preview, keep original pixels, optional second reference
   - the server's edit LoRA is shown as an `auto` row (sent only when changed); a note for large edits
   - the queue with cancel and "Copy to form", live progress, the pictures sent with a job, recent pictures
-- **Gallery** from `GET /jobs` (filters, search, load more) and the **detail page** (settings, timings, input pictures,
+- **Full-screen viewer** (click a picture, or ⤢ on a gallery tile, or *Full screen* on the detail page): browse the gallery's pictures with the arrow buttons, ← → keys or a swipe; Space / click for 100%, F for the browser's full screen, Esc to close
+- **Gallery** from `GET /jobs` (filters, search, load more; delete one job from its tile or the detail page, or *Select* several / *Select all* / Shift-click a range and delete them with `POST /jobs/delete`, 500 ids per call; waiting or running jobs are not selectable) and the **detail page** (settings, timings, input pictures,
   reuse settings with their input pictures and mask, new seed, use as init image / reference, download)
 
 The mask is drawn at the picture's own size and sent as a black-and-white PNG; the server crops the picture and the mask
