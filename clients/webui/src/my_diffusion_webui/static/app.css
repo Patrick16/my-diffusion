@@ -189,3 +189,4 @@ img.fill { border: 1px solid var(--line3); }
 .tile.selecting { cursor: pointer; }
 .tile.picked { outline: 3px solid var(--accent); outline-offset: -3px; }
 .tile.locked { opacity: .45; cursor: not-allowed; }
+.preview img.dim { filter: brightness(.55) saturate(.8); }

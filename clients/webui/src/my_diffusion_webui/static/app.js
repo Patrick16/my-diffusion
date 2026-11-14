@@ -494,6 +494,11 @@ function app() {
       f.push(['Enhance', p.enhance_prompt ? 'on' : 'off']);
       return f;
     },
+    // The picture on the preview: the current job's own once it is done, until then the last finished one.
+    get shown() {
+      if (this.current && this.current.status === 'done') return this.current;
+      return this.jobList.filter(j => j.status === 'done').sort((a, b) => (b.finished_at || 0) - (a.finished_at || 0))[0] || null;
+    },
     get recent() { return this.jobList.filter(j => j.status === 'done').slice(0, 8); },
 
     // ---------------------------------------------------------------- gallery

@@ -321,13 +321,14 @@
                 <button class="btn dng" x-show="current.status === 'queued' || current.status === 'running'" :disabled="current.cancel_requested" @click="cancel(current.job_id)" x-text="current.cancel_requested ? 'Stopping…' : 'Cancel job'"></button>
                 <a class="btn" x-show="current.status === 'done'" :href="'#/job/' + current.job_id">Details</a>
               </div>
-              <div class="preview" :style="'aspect-ratio:' + aspect(current)">
-                <img class="zoomable" x-show="current.status === 'done'" :src="current.status === 'done' ? '/api/result/' + current.job_id + '/image' : ''" alt="Result" title="Click for full screen" @click="lbOpen(current.job_id)">
+              <div class="preview" :style="'aspect-ratio:' + aspect(shown || current)">
+                <img class="zoomable" :class="current.status !== 'done' && 'dim'" x-show="shown" :src="shown ? '/api/result/' + shown.job_id + '/image' : ''" alt="Result" title="Click for full screen" @click="lbOpen(shown.job_id)">
+                <span class="chip" x-show="shown && current.status !== 'done'" style="position:absolute;left:12px;top:12px;background:var(--bg)">Last picture</span>
                 <div class="overlay" x-show="current.status === 'running' || current.status === 'queued'">
                   <div class="row"><span style="font-weight:600" x-text="current.status === 'running' ? 'Denoising' : 'Waiting in the queue'"></span><div class="grow"></div>
                     <span class="mono" x-text="current.status === 'running' ? 'step ' + (current.step || 0) + ' / ' + (current.total_steps || '?') + ' · ' + pct(current) + '%' : 'position ' + current.position"></span></div>
                   <div class="bar"><i :style="'width:' + (current.status === 'running' ? pct(current) : 0) + '%'"></i></div>
-                  <span class="sub">The preview appears when the job is done; a running job stops at its next step when cancelled</span>
+                  <span class="sub">The last finished picture stays here until this one is done; a running job stops at its next step when cancelled</span>
                 </div>
                 <div class="overlay" x-show="current.status === 'failed'"><span class="err" x-text="current.error"></span></div>
                 <div class="overlay" x-show="current.status === 'cancelled'"><span>Cancelled</span></div>
