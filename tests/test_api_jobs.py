@@ -175,7 +175,12 @@ def test_finished_job_cannot_be_cancelled_and_unknown_is_404(client):
 
 
 def test_health_shows_the_slots_and_the_queue(client):
-    body = client.get("/health").json()
+    deadline = time.monotonic() + 5
+    while True:   # the queue starts once the load at start has finished on the slot's thread: a moment after startup
+        body = client.get("/health").json()
+        if not body["queue"]["paused"] or time.monotonic() > deadline:
+            break
+        time.sleep(0.01)
     assert body["access_control"] is False
     assert body["queue"]["slots"] == [{"device": api.DEVICES[0], "job": None}]
     assert body["queue"]["scheduler_alive"] is True and body["queue"]["paused"] is False
