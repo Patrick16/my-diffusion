@@ -32,19 +32,49 @@ command line.
 
 ## Installation
 
+Install [uv](https://docs.astral.sh/uv/) if it is not installed yet. On Windows:
+
+```bash
+winget install --id astral-sh.uv -e
+```
+
+Close and reopen the terminal, then check that the shell finds it. The error `'uv' is not recognized`
+means uv is missing or its folder is not in `PATH`:
+
+```bash
+uv --version
+```
+
+If that fails after reinstalling, the folder with `uv.exe` (usually `%USERPROFILE%\.local\bin`) is not in
+`PATH`; add it in the Windows environment variables and reopen the terminal.
+
 Clone the repository and install the dependencies (torch is taken from the PyTorch CUDA 12.8 index):
 
 ```bash
 uv sync
 ```
 
-Link the models into the project (see [Models](#models)):
+Link the models into the project (see [Models](#models)). Run this from the project root, and pass the
+folder where your models really are, because the script's default (`D:\ai\ModelsHub`) is only the author's
+machine:
 
 ```bash
-pwsh scripts/link_models.ps1
+pwsh scripts/link_models.ps1 -ModelsHub "D:\your\ModelsHub"
 ```
 
+If `pwsh` (PowerShell 7) is not installed, use the Windows PowerShell that comes with Windows:
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/link_models.ps1 -ModelsHub "D:\your\ModelsHub"
+```
+
+The script prints `ok` or `created` for every link. A line `source folder not found, skipping` means the
+path is wrong; fix `-ModelsHub` and run the script again. Without the links the generation commands below
+fail with `FileNotFoundError: no *_quanto_*int8.safetensors ...`.
+
 ## Running
+
+Run all commands from the project root, after `uv sync` and the model linking above.
 
 Generate an image from the command line:
 
